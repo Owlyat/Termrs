@@ -1007,12 +1007,34 @@ fn char_tail(s: &str, keep: usize) -> String {
 ///
 /// Matches a drive (`C:\dir>`, also glued like `outputC:\dir>`) or UNC
 /// (`\\srv\share>`) path ending the trimmed line at `>`, plus Unix paths
-/// behind a PowerShell `PS ` prefix (`PS /home/u>`). Pure function: callers
+/// behind a PowerShell `PS ` prefix (`PS /home/u>`). Also matches a bracketed
+/// absolute path (`┖[F:\dir]`, Clink/oh-my-posh style). Pure function: callers
 /// check `is_dir` so prompt-like output never moves the tracked cwd.
 fn cwd_from_prompt_line(line: &str) -> Option<std::path::PathBuf> {
     let t = line.trim_end();
+    if t.len() < 3 || t.len() > 512 {
+        return None;
+    }
+    // Bracketed prompt: `[<absolute path>]` with at most a short prompt glyph
+    // before it (`┖[F:\dir]`, `❯[/home/u]`). Requiring the decoration keeps
+    // ordinary output like `See [C:\path]` from moving the tracked cwd.
+    if let Some(body) = t.strip_suffix(']')
+        && let Some(open) = body.find('[')
+    {
+        let prefix = &body[..open];
+        let decorated = prefix.chars().count() <= 2
+            && !prefix
+                .chars()
+                .any(|c| c.is_ascii_alphanumeric() || matches!(c, '\\' | '/' | ':' | ' '));
+        if decorated {
+            let inner = body[open + 1..].trim();
+            if looks_like_dir(inner) {
+                return Some(std::path::PathBuf::from(inner));
+            }
+        }
+    }
     // Shortest real prompt is `C:\>`; cap length so hostile output stays cheap.
-    if !t.ends_with('>') || t.len() < 4 || t.len() > 512 {
+    if !t.ends_with('>') || t.len() < 4 {
         return None;
     }
     let body = &t[..t.len() - 1];
@@ -1213,6 +1235,13 @@ mod yank_tests {
         assert_eq!(p("\\\\srv\\share>"), Some("\\\\srv\\share".into()));
         assert_eq!(p("PS /home/u>"), Some("/home/u".into()));
         assert_eq!(p("C:/work>"), Some("C:/work".into()));
+        // Bracketed prompts (Clink/oh-my-posh): `┖[F:\dir]`.
+        assert_eq!(p("┖[F:\\work]"), Some("F:\\work".into()));
+        assert_eq!(p("[C:/work]"), Some("C:/work".into()));
+        assert_eq!(p("[\\\\srv\\share]"), Some("\\\\srv\\share".into()));
+        assert_eq!(p("┏[a][b][master ≢ ~5]"), None);
+        assert_eq!(p("[work]"), None);
+        assert_eq!(p("See [C:\\work]"), None);
         // Not prompts: wrong terminator, relative, junk, bare markers.
         assert_eq!(p("F:\\work$"), None);
         assert_eq!(p("work>"), None);
@@ -1481,6 +1510,9 @@ mod tests {
         assert_eq!(pane.cwd(), dir_a.as_path());
         pane.feed_text_for_test(&format!("done{}>", dir_b.display()), &[]);
         assert_eq!(pane.cwd(), dir_b.as_path());
+        // Clink-style bracketed prompt (`┖[dir]`) moves it as well.
+        pane.feed_text_for_test(&format!("┖[{}]", dir_a.display()), &[]);
+        assert_eq!(pane.cwd(), dir_a.as_path());
         // OSC 7 reports apply too.
         pane.feed_text_for_test("", std::slice::from_ref(&dir_a));
         assert_eq!(pane.cwd(), dir_a.as_path());
