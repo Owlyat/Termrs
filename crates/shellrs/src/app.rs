@@ -13,7 +13,7 @@ use tui_menu::{MenuEvent, MenuItem, MenuState};
 use crate::commands_db::{self, CommandDb, SavedCommand};
 use crate::config::{Config, FxKind, ThemeColors};use crate::font::FontEntry;
 use crate::image_view::ImageView;
-use crate::keys::{self, Key, KeyPress, Mods, to_bytes};
+use crate::keys::{self, Key, KeyKind, KeyPress, Mods};
 use crate::layout::LayoutFile;
 use crate::scrollback::ScrollbackView;
 use crate::workspace::{Direction, SplitDir, Workspace};
@@ -167,6 +167,7 @@ pub enum Command {
     CommandPalette,
     Commands,
     SaveCommand,
+    SaveLayout,
     YankLast,
     SelectMode,
     EditConfig,
@@ -209,6 +210,7 @@ impl Command {
         (Command::CommandPalette, "Command palette"),
         (Command::Commands, "Saved commands (pick & run)"),
         (Command::SaveCommand, "Save command to database"),
+        (Command::SaveLayout, "Save layout"),
         (Command::YankLast, "Yank last output"),
         (Command::SelectMode, "Select mode"),
         (Command::EditConfig, "Edit config & reload"),
@@ -1550,6 +1552,9 @@ impl CommandArgs {
 /// Full app state.
 pub struct App {
     pub config: Config,
+    /// Shared braille dot list: the UI fills it each frame and the GPU
+    /// post-processor draws it. `window` hands the same `Arc` to both.
+    pub braille: std::sync::Arc<std::sync::Mutex<Vec<crate::image_gpu::Dot>>>,
     workspaces: Vec<Workspace>,
     current: usize,
     prompt: Option<Prompt>,
@@ -1605,6 +1610,11 @@ pub struct App {
     /// window host (which owns pixel metrics) just before each draw. The ui
     /// border uses it so chrome and texture line up exactly.
     image_rect: Option<Rect>,
+    /// Last pointer report forwarded to a pane: `(pane id, inner col, inner
+    /// row, left held)`. Motion is only forwarded when this changes, so a
+    /// held/jittery pointer does not flood the app with identical reports
+    /// (and holding still sends nothing until release).
+    last_mouse_cell: Option<(usize, u16, u16, bool)>,
     /// Big-text help overlay.
     pub about: bool,
     pub status: String,
@@ -1693,6 +1703,7 @@ impl App {
         };
         let mut app = Self {
             config,
+            braille: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             workspaces,
             current: 0,
             prompt: None,
@@ -1722,6 +1733,7 @@ impl App {
             select: None,
             image: None,
             image_rect: None,
+            last_mouse_cell: None,
             about: false,
             status: String::new(),
             should_quit: false,
@@ -1806,7 +1818,6 @@ impl App {
     /// Called every frame from [`App::poll_panes`].
     fn poll_closing(&mut self) {
         let now = std::time::Instant::now();
-        let mut done = false;
         let mut i = 0;
         while i < self.closing.len() {
             if now >= self.closing[i].until {
@@ -1818,13 +1829,9 @@ impl App {
                 if empty {
                     self.drop_workspace(c.ws);
                 }
-                done = true;
             } else {
                 i += 1;
             }
-        }
-        if done {
-            self.save_layout();
         }
     }
 
@@ -1875,7 +1882,6 @@ impl App {
         }
         if ws.leaf_ids().len() <= 1 {
             self.drop_workspace(ws_idx);
-            self.save_layout();
             return;
         }
         // Focus a survivor when the dead pane had focus.
@@ -1891,7 +1897,6 @@ impl App {
         match self.close_delay_ms() {
             0 => {
                 self.workspaces[ws_idx].remove_leaf(id);
-                self.save_layout();
             }
             ms => {
                 self.closing.push(ClosingPane {
@@ -2055,7 +2060,7 @@ impl App {
 
     /// Handle a key press from the HTTP server.
     fn handle_http_key(&mut self, key: String, modifier: Option<String>) {
-        use crate::keys::{Key, KeyPress, Mods};
+        use crate::keys::{Key, KeyKind, KeyPress, Mods};
         let mut mods = Mods::empty();
         if let Some(m) = modifier {
             if m.contains("Ctrl") { mods.insert(Mods::CONTROL); }
@@ -2092,18 +2097,33 @@ impl App {
             k if k.len() == 1 => Key::Char(k.chars().next().unwrap()),
             _ => return,
         };
-        let press = KeyPress { key: k, mods, text: None };
+        let press = KeyPress {
+            key: k,
+            mods,
+            text: None,
+            kind: KeyKind::Press,
+        };
         self.handle_key(press);
     }
 
     /// Handle a command string from the HTTP server: type each char then press Enter.
     fn handle_http_command(&mut self, cmd: &str) {
-        use crate::keys::{Key, KeyPress};
+        use crate::keys::{Key, KeyKind, KeyPress};
         for ch in cmd.chars() {
-            let press = KeyPress { key: Key::Char(ch), mods: crate::keys::Mods::empty(), text: None };
+            let press = KeyPress {
+                key: Key::Char(ch),
+                mods: crate::keys::Mods::empty(),
+                text: None,
+                kind: KeyKind::Press,
+            };
             self.handle_key(press);
         }
-        let press = KeyPress { key: Key::Enter, mods: crate::keys::Mods::empty(), text: None };
+        let press = KeyPress {
+            key: Key::Enter,
+            mods: crate::keys::Mods::empty(),
+            text: None,
+            kind: KeyKind::Press,
+        };
         self.handle_key(press);
     }
 
@@ -2265,6 +2285,17 @@ impl App {
     /// Overlays are dispatched by [`Mode`] (State pattern); ordinary keys go
     /// through a table-driven [`App::keymap`] lookup (Command pattern).
     pub fn handle_key(&mut self, ev: KeyPress) -> bool {
+        // Releases never trigger bindings/overlays: they only exist so a
+        // win32-input-mode child can observe a key being let go.
+        if ev.kind == KeyKind::Release {
+            if self.mode() == Mode::Normal {
+                let ws = self.ws_mut();
+                if let Some(p) = ws.pane_mut(ws.focused) {
+                    p.write_key(&ev);
+                }
+            }
+            return false;
+        }
         match self.mode() {
             Mode::Image => {
                 if matches!(ev.key, Key::Esc | Key::Char('q')) {
@@ -2359,10 +2390,9 @@ impl App {
             return false;
         }
         // Regular terminal input -> focused pane of current workspace.
-        let bytes = to_bytes(&ev);
         let ws = self.ws_mut();
         if let Some(p) = ws.pane_mut(ws.focused) {
-            p.write(&bytes);
+            p.write_key(&ev);
         }
         false
     }
@@ -2586,7 +2616,6 @@ impl App {
                 if !name.is_empty() {
                     self.ws_mut().name = name.clone();
                     self.status = format!("workspace renamed to {name}");
-                    self.save_layout();
                 }
             }
             PromptKind::ViewImage => {
@@ -2876,7 +2905,6 @@ impl App {
             Ok(id) => {
                 self.status.clear();
                 self.queue_fx(id, FxKind::Fresh);
-                self.save_layout();
                 log::debug!("split {dir:?} -> pane {id}");
             }
             Err(e) => self.status = format!("split failed: {e}"),
@@ -2905,7 +2933,6 @@ impl App {
         match self.close_delay_ms() {
             0 => {
                 self.ws_mut().remove_leaf(target);
-                self.save_layout();
             }
             ms => {
                 self.closing.push(ClosingPane {
@@ -2954,9 +2981,7 @@ impl App {
 
     /// Grow the focused pane toward `dir` (wezterm AdjustPaneSize).
     fn resize_focused(&mut self, dir: Direction) {
-        if self.ws_mut().resize_focused(dir, 0.05) {
-            self.save_layout();
-        }
+        self.ws_mut().resize_focused(dir, 0.05);
     }
 
     /// Toggle maximize on the focused pane: it takes the whole workspace
@@ -3887,6 +3912,10 @@ impl App {
             Command::CommandPalette => self.open_palette(),
             Command::Commands => self.open_commands(),
             Command::SaveCommand => self.open_command_form(),
+            Command::SaveLayout => {
+                self.save_layout();
+                self.status = format!("layout saved to {}", self.layout_path.display());
+            }
             Command::YankLast => self.yank_last_output(),
             Command::SelectMode => self.toggle_select(),
             Command::EditConfig => self.edit_config(),
@@ -4159,6 +4188,9 @@ impl App {
         pressed: bool,
         mods: Mods,
     ) -> MouseClickOutcome {
+        // Any button activity starts a fresh gesture: drop the motion
+        // coalescing cache so the next move reports even at the same cell.
+        self.last_mouse_cell = None;
         // Menu bar clicks work even with `[mouse] enabled = false`: the
         // switch only gates forwarding to terminal apps.
         if pressed && button == crate::mouse::MouseButton::Left {
@@ -4232,7 +4264,7 @@ impl App {
             if !state.release {
                 return MouseClickOutcome::Ignored;
             }
-            crate::mouse::encode_release(c, r, mods, state.encoding)
+            crate::mouse::encode_release(button, c, r, mods, state.encoding)
         };
         if let Some(pane) = self.ws_mut().pane_mut(id) {
             pane.write(&bytes);
@@ -4243,22 +4275,36 @@ impl App {
     }
 
     /// Pointer motion from the window host (`held` = left button is down).
-    /// Only forwarded when the pane under the cursor asked for it; returns
-    /// whether anything was written.
+    /// Only forwarded when the pane under the cursor asked for it, and only
+    /// when the target cell (or button state) actually changed: a stationary
+    /// or jittering pointer inside one cell sends nothing, so holding the
+    /// button no longer streams repeated reports. Returns whether anything
+    /// was written.
     pub fn mouse_move(&mut self, col: u16, row: u16, mods: Mods, held: bool) -> bool {
         if !self.config.mouse.enabled || self.mode() != Mode::Normal {
             return false;
         }
         let Some((id, c, r)) = self.inner_at(col, row) else {
+            self.last_mouse_cell = None;
             return false;
         };
         let state = match self.ws().pane(id) {
             Some(pane) => pane.mouse_state(),
-            None => return false,
+            None => {
+                self.last_mouse_cell = None;
+                return false;
+            }
         };
         if !state.wants_motion(held) {
             return false;
         }
+        // Coalesce: identical consecutive reports carry no new information
+        // (the app only sees cell coordinates), so drop them.
+        let key = (id, c, r, held);
+        if self.last_mouse_cell == Some(key) {
+            return false;
+        }
+        self.last_mouse_cell = Some(key);
         let button = held.then_some(crate::mouse::MouseButton::Left);
         let bytes = crate::mouse::encode_motion(button, c, r, mods, state.encoding);
         if let Some(pane) = self.ws_mut().pane_mut(id) {
@@ -4769,7 +4815,6 @@ impl App {
             }
             c
         };
-        self.save_layout();
         log::info!("moved workspace {from} -> {to}");
     }
 
@@ -4791,7 +4836,6 @@ impl App {
                 self.ws_mut().mark_seen();
                 self.status = format!("workspace ws-{n}");
                 self.queue_fx(0, FxKind::Fresh);
-                self.save_layout();
                 log::info!("new workspace ws-{n}");
             }
             Err(e) => self.status = format!("workspace failed: {e}"),
@@ -4808,7 +4852,6 @@ impl App {
         }
         let cur = self.current;
         self.drop_workspace(cur);
-        self.save_layout();
     }
 }
 
@@ -4822,6 +4865,7 @@ mod tests {
             key,
             mods,
             text: None,
+            kind: KeyKind::Press,
         }
     }
 
@@ -4851,12 +4895,15 @@ mod tests {
         let pending = app.drain_fx();
         assert!(pending.iter().any(|p| p.kind == FxKind::Close));
 
-        // After the deadline the leaf is gone and the layout is saved.
+        // After the deadline the leaf is gone; the layout is only persisted
+        // on demand, never automatically.
         std::thread::sleep(std::time::Duration::from_millis(500));
         app.poll_panes();
         assert!(app.closing.is_empty());
         assert_eq!(app.ws().leaf_ids().len(), 1);
-        assert!(layout.is_file());
+        assert!(!layout.is_file(), "layout must not be auto-saved");
+        app.run_command(Command::SaveLayout);
+        assert!(layout.is_file(), "Save layout command persists the layout");
         for w in &mut app.workspaces {
             w.kill_all();
         }
@@ -6049,7 +6096,9 @@ mod tests {
         assert_eq!(names(&app), ["ws-1", "ws-2", "main"]);
         assert_eq!(app.workspaces[app.current].name, "main");
         assert_eq!(app.current, 2);
-        // Order persisted to the layout file.
+        // Persistence is explicit: nothing is written until "Save layout".
+        assert!(!layout.is_file(), "reorder must not auto-save");
+        app.run_command(Command::SaveLayout);
         let text = std::fs::read_to_string(&layout).expect("layout saved");
         let file: crate::layout::LayoutFile = toml::from_str(&text).expect("layout parses");
         let saved: Vec<String> = file.workspaces.iter().map(|w| w.name.clone()).collect();
@@ -6250,6 +6299,7 @@ mod tests {
             key: Key::Space,
             mods,
             text: None,
+            kind: KeyKind::Press,
         });
         assert!(app.select.is_some(), "ctrl+shift+space enters select mode");
 
@@ -6379,6 +6429,54 @@ mod tests {
         rt.shutdown_background();
     }
 
+    /// Holding the button no longer streams identical motion reports: a
+    /// repeat move in the same cell is coalesced, a new cell reports, and a
+    /// fresh button gesture resets the cache.
+    #[test]
+    fn mouse_motion_is_coalesced_per_cell() {
+        use crate::mouse::MouseButton as MButton;
+        let _guard = crate::pty::lock_pty_tests();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (wake, _rx) = crossbeam_channel::unbounded::<()>();
+        let layout = unique_temp_path("mousecoalesce");
+        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
+            .expect("app boots");
+        let fid = app.ws().focused;
+        app.ws_mut()
+            .set_rects(&[(fid, ratatui::layout::Rect::new(0, 0, 80, 24))]);
+        // Drag tracking (1002) + SGR.
+        app.ws_mut()
+            .pane_mut(fid)
+            .expect("pane")
+            .feed_for_test(b"\x1b[?1002h\x1b[?1006h");
+
+        // First drag report at a cell is sent; an immediate repeat is not.
+        assert!(app.mouse_move(5, 5, Mods::empty(), true), "first move reports");
+        assert!(
+            !app.mouse_move(5, 5, Mods::empty(), true),
+            "same cell is coalesced"
+        );
+        // A different cell reports again.
+        assert!(app.mouse_move(6, 5, Mods::empty(), true), "new cell reports");
+        // Releasing and pressing again resets the cache, so the next move
+        // at the very same cell reports.
+        app.mouse_button(6, 5, MButton::Left, false, Mods::empty());
+        app.mouse_button(6, 5, MButton::Left, true, Mods::empty());
+        assert!(
+            app.mouse_move(6, 5, Mods::empty(), true),
+            "gesture reset re-reports"
+        );
+
+        for w in &mut app.workspaces {
+            w.kill_all();
+        }
+        let _ = std::fs::remove_file(&layout);
+        rt.shutdown_background();
+    }
+
     /// `url_at` finds a fed link at inner-grid coords without opening
     /// anything (opening a real browser is never exercised in tests).
     #[test]
@@ -6440,6 +6538,7 @@ mod tests {
             key: Key::Char(c),
             mods: Mods::CONTROL,
             text: None,
+            kind: KeyKind::Press,
         };
         assert!(matches!(
             app.lookup_command(&ctrl('o')),

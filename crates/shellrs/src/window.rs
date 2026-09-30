@@ -23,9 +23,13 @@ use winit::window::{Window, WindowId};
 
 use crate::app::App;
 use crate::config::Config;
+use crate::image_gpu::Dot;
 use crate::image_gpu::ImagePostProcessor;
+use crate::image_gpu::ProcessorUserData;
 use crate::keys::{self, KeyPress, Mods};
 use crate::ui;
+
+use std::sync::Mutex;
 
 /// Redraw cadence while panes are live (spinner + PTY output).
 const FRAME: Duration = Duration::from_millis(16);
@@ -67,6 +71,8 @@ pub struct ShellrsWindow {
     proxy: Option<EventLoopProxy<AppEvent>>,
     /// Loaded font bytes (primary + fallbacks) for backend rebuilds (zoom).
     font_set: Option<crate::font::FontSet>,
+    /// Shared braille dot list (UI fills it; the post-processor draws it).
+    braille: Arc<Mutex<Vec<Dot>>>,
     /// Last cursor position in physical pixels (for click hit-testing).
     cursor: PhysicalPosition<f64>,
     /// Left button currently held (for drag-motion mouse reports).
@@ -115,6 +121,7 @@ impl ShellrsWindow {
             raw_tx: None,
             proxy: None,
             font_set: None,
+            braille: Arc::new(Mutex::new(Vec::new())),
             cursor: PhysicalPosition::new(0.0, 0.0),
             left_held: false,
             title: String::new(),
@@ -154,7 +161,14 @@ impl ShellrsWindow {
         // makes the picked font actually render; `select_font` stops at the
         // first full-coverage candidate, i.e. this one for normal text.
         let backend = pollster::block_on(
-            Builder::from_font_and_user_data(font.clone(), (clear, theme.bg))
+            Builder::from_font_and_user_data(
+                font.clone(),
+                ProcessorUserData {
+                    braille: self.braille.clone(),
+                    clear,
+                    bg: theme.bg,
+                },
+            )
                 .with_regular_fonts([font])
                 .with_fonts(fallbacks)
                 .with_width_and_height(Dimensions { width, height })
@@ -401,6 +415,9 @@ impl ShellrsWindow {
             http_server,
             server_mode,
         )?;
+        // Share one braille dot buffer between the UI (writer) and the GPU
+        // post-processor (reader).
+        app.braille = self.braille.clone();
         log::info!("app booted");
 
         // Input worker: translate raw keys off the UI thread, then wake the
@@ -809,9 +826,6 @@ impl ApplicationHandler<AppEvent> for ShellrsWindow {
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(app) = self.app.as_mut() {
-                    app.save_layout();
-                }
                 event_loop.exit();
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -894,23 +908,26 @@ impl ApplicationHandler<AppEvent> for ShellrsWindow {
                 self.mods = mods_from(m.state());
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                // Presses (including auto-repeat) go to the input worker;
-                // the translated press comes back as a user event.
-                if event.state == ElementState::Pressed {
-                    if let Some(tx) = &self.raw_tx {
-                        // Debug aid: `--debug` reveals exactly what the
-                        // platform reports (letter vs C0 control char).
-                        log::debug!(
-                            "key logical={:?} text={:?} mods={:?}",
-                            event.logical_key,
-                            event.text,
-                            self.mods
-                        );
-                        let _ = tx.send(RawInput {
-                            event: event.clone(),
-                            mods: self.mods,
-                        });
-                    }
+                // Presses, auto-repeats *and* releases go to the input worker;
+                // the translated event comes back as a user event. Releases are
+                // only observable by a child in `win32-input-mode`, but they
+                // must reach it for held keys (sliders) to work.
+                if matches!(event.state, ElementState::Pressed | ElementState::Released)
+                    && let Some(tx) = &self.raw_tx
+                {
+                    // Debug aid: `--debug` reveals exactly what the platform
+                    // reports (letter vs C0 control char).
+                    log::debug!(
+                        "key logical={:?} text={:?} state={:?} mods={:?}",
+                        event.logical_key,
+                        event.text,
+                        event.state,
+                        self.mods
+                    );
+                    let _ = tx.send(RawInput {
+                        event: event.clone(),
+                        mods: self.mods,
+                    });
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -972,7 +989,6 @@ impl ApplicationHandler<AppEvent> for ShellrsWindow {
         if let Some(app) = self.app.as_mut() {
             app.poll_panes();
             if app.should_quit {
-                app.save_layout();
                 event_loop.exit();
                 return;
             }

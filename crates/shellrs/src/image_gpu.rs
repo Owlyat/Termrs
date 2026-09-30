@@ -20,6 +20,28 @@ use ratatui_wgpu::PostProcessor;
 use ratatui_wgpu::wgpu;
 use ratatui_wgpu::wgpu::util::DeviceExt;
 
+use std::sync::Arc;
+use std::sync::Mutex;
+
+/// One braille dot quad, in normalised device coordinates. Braille cells are
+/// drawn as geometry (see `ui::collect_braille`) instead of as a font glyph,
+/// because font braille glyphs only cover part of their cell and leave
+/// inconsistent row/column gaps. `ndc` is `[x0, y0, x1, y1]` with `y0` above
+/// `y1`; `color` is linear RGBA (the surface sRGB-encodes on write).
+#[derive(Clone, Copy, Default)]
+pub struct Dot {
+    pub ndc: [f32; 4],
+    pub color: [f32; 4],
+}
+
+/// External state handed to the post processor at build time: the shared
+/// braille dot list the UI fills each frame, plus the surface clear colour.
+pub struct ProcessorUserData {
+    pub braille: Arc<Mutex<Vec<Dot>>>,
+    pub clear: [f64; 4],
+    pub bg: [u8; 3],
+}
+
 /// Backdrop + overlay layers for the window renderer.
 pub struct ImagePostProcessor {
     device: wgpu::Device,
@@ -30,6 +52,13 @@ pub struct ImagePostProcessor {
     premultiplied: bool,
     text: Stage,
     image: Stage,
+    /// Solid-quad pass for braille dots (no texture bindings).
+    braille: wgpu::RenderPipeline,
+    /// Shared dot list the UI fills every frame.
+    braille_dots: Arc<Mutex<Vec<Dot>>>,
+    /// Cached braille vertex buffer, grown when it is too small.
+    braille_buffer: Option<wgpu::Buffer>,
+    braille_cap: usize,
     linear: wgpu::Sampler,
     text_uniform: wgpu::Buffer,
     backdrop: Option<Layer>,
@@ -141,6 +170,23 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         rgb = rgb * a; // premultiplied surface
     }
     return vec4<f32>(rgb, a);
+}
+"#;
+
+const BRAILLE_WGSL: &str = r#"
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) color: vec4<f32> };
+
+@vertex
+fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>) -> VOut {
+    var o: VOut;
+    o.pos = vec4<f32>(pos, 0.0, 1.0);
+    o.color = color;
+    return o;
+}
+
+@fragment
+fn fs(in: VOut) -> @location(0) vec4<f32> {
+    return in.color;
 }
 "#;
 
@@ -328,7 +374,40 @@ impl ImagePostProcessor {
             1.0 - (y + h) / sh * 2.0,
         ]
     }
+
+    /// Pack the current braille dot list into raw vertex bytes: six vertices
+    /// per quad, each `pos: [f32;2]` + `color: [f32;4]`.
+    fn braille_vertex_bytes(&self) -> Vec<u8> {
+        let dots = match self.braille_dots.lock() {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::with_capacity(dots.len() * 6 * BRAILLE_VERTEX_BYTES);
+        for d in dots.iter() {
+            let [x0, y0, x1, y1] = d.ndc;
+            let verts = [
+                [x0, y0],
+                [x1, y0],
+                [x0, y1],
+                [x1, y0],
+                [x1, y1],
+                [x0, y1],
+            ];
+            for pos in verts {
+                for f in pos {
+                    out.extend_from_slice(&f.to_ne_bytes());
+                }
+                for f in d.color {
+                    out.extend_from_slice(&f.to_ne_bytes());
+                }
+            }
+        }
+        out
+    }
 }
+
+/// Bytes per braille vertex (`pos` 2×f32 + `color` 4×f32).
+const BRAILLE_VERTEX_BYTES: usize = 24;
 
 /// `ndc + (alpha, premultiplied)` packed as two 16-byte aligned vec4s.
 fn params2_bytes(ndc: &[f32; 4], alpha: f32, premult: f32) -> [u8; 32] {
@@ -353,7 +432,7 @@ fn text_params_bytes(bg: [f32; 3], premult: f32) -> [u8; 32] {
 
 impl PostProcessor for ImagePostProcessor {
     /// Clear colour `[r, g, b, a]` in **sRGB** 0..1 (converted to linear here).
-    type UserData = ([f64; 4], [u8; 3]);
+    type UserData = ProcessorUserData;
 
     fn compile(
         device: &wgpu::Device,
@@ -362,7 +441,11 @@ impl PostProcessor for ImagePostProcessor {
         user_data: Self::UserData,
     ) -> Self {
         let format = surface_config.format;
-        let (bg, bg_u8) = user_data;
+        let ProcessorUserData {
+            braille: braille_dots,
+            clear: bg,
+            bg: bg_u8,
+        } = user_data;
         let premultiplied = surface_config.alpha_mode
             == wgpu::CompositeAlphaMode::PreMultiplied;
         log::info!(
@@ -415,6 +498,10 @@ impl PostProcessor for ImagePostProcessor {
             premultiplied,
             text: build_text_stage(device, format, premultiplied),
             image: build_image_stage(device, format, premultiplied),
+            braille: build_braille_pipeline(device, format, premultiplied),
+            braille_dots,
+            braille_buffer: None,
+            braille_cap: 0,
             linear,
             text_uniform,
             backdrop: None,
@@ -467,6 +554,26 @@ impl PostProcessor for ImagePostProcessor {
             }
         }
 
+        // Braille dots are solid quads drawn over the text (the UI blanks the
+        // font glyphs). Uploaded through a cached, growable vertex buffer.
+        let braille_bytes = self.braille_vertex_bytes();
+        let braille_count = (braille_bytes.len() / BRAILLE_VERTEX_BYTES) as u32;
+        if braille_count > 0 {
+            if self.braille_buffer.is_none() || self.braille_cap < braille_bytes.len() {
+                let cap = braille_bytes.len().next_power_of_two().max(1024);
+                self.braille_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("shellrs braille"),
+                    size: cap as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+                self.braille_cap = cap;
+            }
+            if let Some(buf) = &self.braille_buffer {
+                queue.write_buffer(buf, 0, &braille_bytes);
+            }
+        }
+
         let text_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shellrs text bg"),
             layout: &self.text.layout,
@@ -513,7 +620,15 @@ impl PostProcessor for ImagePostProcessor {
         pass.set_pipeline(&self.text.pipeline);
         pass.set_bind_group(0, &text_bg, &[]);
         pass.draw(0..3, 0..1);
-        // 3. Overlay image (ctrl+i viewer) on top.
+        // 3. Braille dots (geometric; their font glyphs were blanked by the ui).
+        if braille_count > 0 {
+            if let Some(buf) = &self.braille_buffer {
+                pass.set_pipeline(&self.braille);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..braille_count, 0..1);
+            }
+        }
+        // 4. Overlay image (ctrl+i viewer) on top.
         if let (Some(o), Some(rect)) = (&self.overlay, self.rect) {
             if rect.2 > 1.0 && rect.3 > 1.0 {
                 pass.set_pipeline(&self.image.pipeline);
@@ -521,7 +636,7 @@ impl PostProcessor for ImagePostProcessor {
                 pass.draw(0..4, 0..1);
             }
         }
-        // 4. Terminal cursor (bar/underline) above everything.
+        // 5. Terminal cursor (bar/underline) above everything.
         if let (Some(c), Some(rect)) = (&self.cursor, self.cursor_rect) {
             if rect.2 >= 1.0 && rect.3 >= 1.0 {
                 pass.set_pipeline(&self.image.pipeline);
@@ -675,6 +790,55 @@ fn build_image_stage(
         cache: None,
     });
     Stage { pipeline, layout }
+}
+
+/// Solid-quad pipeline for braille dots (vertex buffer, no bindings).
+fn build_braille_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    premultiplied: bool,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("shellrs braille"),
+        source: wgpu::ShaderSource::Wgsl(BRAILLE_WGSL.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("shellrs braille pl"),
+        bind_group_layouts: &[],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("shellrs braille pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: BRAILLE_VERTEX_BYTES as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(blend(premultiplied)),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

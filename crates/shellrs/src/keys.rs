@@ -5,6 +5,7 @@
 
 use std::ops::{BitOr, BitOrAssign};
 
+use winit::event::ElementState;
 use winit::event::KeyEvent as WinitKeyEvent;
 use winit::keyboard::{Key as WinitKey, NamedKey};
 
@@ -80,6 +81,15 @@ pub enum Key {
     F(u8),
 }
 
+/// Whether a key event is an initial press, an auto-repeat, or a release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyKind {
+    #[default]
+    Press,
+    Repeat,
+    Release,
+}
+
 /// One key press: the key, its modifiers, and any text it produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyPress {
@@ -88,6 +98,8 @@ pub struct KeyPress {
     /// Text produced by the press (respects layout/shift); `None` for
     /// control combos and pure navigation keys.
     pub text: Option<String>,
+    /// Press / auto-repeat / release.
+    pub kind: KeyKind,
 }
 
 /// Parsed key binding: key plus required modifiers.
@@ -323,6 +335,107 @@ fn ctrl_byte(c: char) -> Option<u8> {
     }
 }
 
+/// Encode one key event in ConPTY's `win32-input-mode`
+/// (`CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`).
+///
+/// ConPTY always asks the terminal to switch into this mode at startup
+/// (`CSI ? 9001 h`); honouring it is what gives the hosted console app real
+/// key-down/key-up timing (a plain VT encoding only ever delivers the press,
+/// so apps can never observe a held key -- which is why sliders in `osutty`
+/// misbehave). Virtual key codes come from the OS keyboard layout; scan codes
+/// are derived from them.
+#[cfg(windows)]
+pub fn to_win32_bytes(press: &KeyPress) -> Vec<u8> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC, MapVirtualKeyW};
+    let vk = virtual_key(press);
+    if vk == 0 {
+        return Vec::new();
+    }
+    let sc = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16 };
+    let uc = unicode_char(press);
+    // Navigation/editing keys sit on the "enhanced" keyboard half; the bit
+    // lets ConPTY tell them apart from their numeric-keypad twins.
+    let enhanced = matches!(
+        press.key,
+        Key::Up | Key::Down | Key::Left | Key::Right | Key::Home | Key::End
+            | Key::PageUp | Key::PageDown | Key::Insert | Key::Delete
+    );
+    let cs = control_key_state(press.mods) | if enhanced { 0x0100 } else { 0 };
+    let kd = u8::from(press.kind != KeyKind::Release);
+    format!("\x1b[{vk};{sc};{uc};{kd};{cs};1_").into_bytes()
+}
+
+/// Windows virtual key code for a press (0 when unknown).
+#[cfg(windows)]
+fn virtual_key(press: &KeyPress) -> u16 {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW;
+    if let Key::Char(c) = press.key {
+        let u = c as u32;
+        if u > 0xFFFF {
+            return 0;
+        }
+        let r = unsafe { VkKeyScanW(u as u16) };
+        return if r == -1 { 0 } else { (r as u16) & 0xFF };
+    }
+    match press.key {
+        Key::Space => 0x20,
+        Key::Enter => 0x0D,
+        Key::Esc => 0x1B,
+        Key::Tab | Key::BackTab => 0x09,
+        Key::Backspace => 0x08,
+        Key::Delete => 0x2E,
+        Key::Insert => 0x2D,
+        Key::Up => 0x26,
+        Key::Down => 0x28,
+        Key::Left => 0x25,
+        Key::Right => 0x27,
+        Key::Home => 0x24,
+        Key::End => 0x23,
+        Key::PageUp => 0x21,
+        Key::PageDown => 0x22,
+        Key::F(n) => 0x70 + (n as u16).saturating_sub(1),
+        Key::Char(_) => 0,
+    }
+}
+
+/// UTF-16 code unit carried by the event (the produced text, else the key's
+/// natural character); 0 for pure navigation keys.
+#[cfg(windows)]
+fn unicode_char(press: &KeyPress) -> u16 {
+    if let Some(ch) = press.text.as_deref().and_then(|t| t.chars().next()) {
+        let mut buf = [0u16; 2];
+        for u in ch.encode_utf16(&mut buf) {
+            return *u;
+        }
+    }
+    match press.key {
+        Key::Space => 0x20,
+        Key::Enter => 0x0D,
+        Key::Esc => 0x1B,
+        Key::Tab | Key::BackTab => 0x09,
+        Key::Backspace => 0x08,
+        Key::Char(c) if (c as u32) < 0x10000 => c as u16,
+        _ => 0,
+    }
+}
+
+/// `dwControlKeyState` bits (left-hand variants; the hosted app cannot tell
+/// sides apart from a winit event). SHIFT / CTRL / ALT.
+#[cfg(windows)]
+fn control_key_state(mods: Mods) -> u32 {
+    let mut cs = 0u32;
+    if mods.contains(Mods::SHIFT) {
+        cs |= 0x0010;
+    }
+    if mods.contains(Mods::CONTROL) {
+        cs |= 0x0008;
+    }
+    if mods.contains(Mods::ALT) {
+        cs |= 0x0002;
+    }
+    cs
+}
+
 /// Whether a named key + modifiers is an OS shortcut that must never reach
 /// the shell. Alt+Tab is the window-switch combo: Windows delivers the Tab
 /// press to the app before stealing focus, and the stray `\t` would land in
@@ -394,7 +507,17 @@ pub fn from_winit(ev: &WinitKeyEvent, mods: Mods) -> Option<KeyPress> {
         _ => return None,
     };
     let text = ev.text.as_ref().map(|t| t.to_string());
-    Some(KeyPress { key, mods, text })
+    let kind = match ev.state {
+        ElementState::Pressed if ev.repeat => KeyKind::Repeat,
+        ElementState::Pressed => KeyKind::Press,
+        ElementState::Released => KeyKind::Release,
+    };
+    Some(KeyPress {
+        key,
+        mods,
+        text,
+        kind,
+    })
 }
 
 /// Map a character produced by the platform to a key + modifiers.
@@ -446,6 +569,7 @@ mod tests {
             key,
             mods,
             text: None,
+            kind: KeyKind::Press,
         }
     }
 
@@ -471,7 +595,8 @@ mod tests {
             &KeyPress {
                 key: k,
                 mods: m,
-                text: None
+                text: None,
+                kind: KeyKind::Press,
             },
             "ctrl+o"
         ));
@@ -515,6 +640,7 @@ mod tests {
             key: Key::Space,
             mods,
             text: None,
+            kind: KeyKind::Press,
         };
         assert!(matches(&p, "ctrl+shift+space"));
     }
@@ -661,6 +787,7 @@ mod tests {
             key: Key::Char('A'),
             mods: Mods::SHIFT,
             text: Some("A".into()),
+            kind: KeyKind::Press,
         };
         assert_eq!(to_bytes(&p), b"A".to_vec());
     }
@@ -671,7 +798,35 @@ mod tests {
             key: Key::Char('x'),
             mods: Mods::ALT,
             text: Some("x".into()),
+            kind: KeyKind::Press,
         };
         assert_eq!(to_bytes(&p), b"\x1bx".to_vec());
+    }
+
+    /// `win32-input-mode` records carry Vk/Sc/Uc/Kd/Cs/Rc; press has Kd=1 and
+    /// release Kd=0 so a held key (slider) can be observed by the child.
+    #[cfg(windows)]
+    #[test]
+    fn win32_bytes_encode_press_and_release() {
+        let params = |kind| {
+            let p = KeyPress {
+                key: Key::Char('z'),
+                mods: Mods::empty(),
+                text: Some("z".into()),
+                kind,
+            };
+            let text = String::from_utf8(to_win32_bytes(&p)).unwrap();
+            let body = text.strip_prefix("\x1b[").unwrap().strip_suffix("_").unwrap();
+            body.split(';').map(str::to_string).collect::<Vec<_>>()
+        };
+        let down = params(KeyKind::Press);
+        let up = params(KeyKind::Release);
+        assert_eq!(down.len(), 6);
+        assert_eq!(up.len(), 6);
+        assert_eq!(down[2], "122"); // UnicodeChar 'z'
+        assert_eq!(up[2], "122");
+        assert_eq!(down[3], "1"); // bKeyDown
+        assert_eq!(up[3], "0"); // key up
+        assert!(down[0].parse::<u32>().unwrap() > 0, "virtual key code present");
     }
 }

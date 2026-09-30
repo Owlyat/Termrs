@@ -84,9 +84,26 @@ pub fn encode_press(
     encode(base_button(button), false, false, col, row, mods, encoding)
 }
 
-/// Encode a button release (always button 3).
-pub fn encode_release(col: u16, row: u16, mods: Mods, encoding: MouseEncoding) -> Vec<u8> {
-    encode(3, true, false, col, row, mods, encoding)
+/// Encode a button release.
+///
+/// SGR (1006) reports the button that was released (`0` = left) with the
+/// lowercase `m` suffix — this is what xterm and wezterm emit, and what
+/// ConPTY (hence Windows console children like crossterm) expects. The
+/// legacy X10/UTF-8 encodings cannot carry the button, so they use the
+/// conventional button-3 release marker.
+pub fn encode_release(
+    button: MouseButton,
+    col: u16,
+    row: u16,
+    mods: Mods,
+    encoding: MouseEncoding,
+) -> Vec<u8> {
+    match encoding {
+        MouseEncoding::Sgr => encode(base_button(button), true, false, col, row, mods, encoding),
+        MouseEncoding::X10 | MouseEncoding::Utf8 => {
+            encode(3, true, false, col, row, mods, encoding)
+        }
+    }
 }
 
 /// Encode motion: `button` is the held button, or `None` for a free move
@@ -284,10 +301,15 @@ mod tests {
             encode_press(MouseButton::Left, 4, 9, Mods::empty(), MouseEncoding::Sgr),
             b"\x1b[<0;5;10M".to_vec()
         );
-        // Release is always button 3 with `m`.
+        // SGR release carries the released button (left = 0) with `m`,
+        // matching xterm/wezterm (what ConPTY and crossterm expect).
         assert_eq!(
-            encode_release(4, 9, Mods::empty(), MouseEncoding::Sgr),
-            b"\x1b[<3;5;10m".to_vec()
+            encode_release(MouseButton::Left, 4, 9, Mods::empty(), MouseEncoding::Sgr),
+            b"\x1b[<0;5;10m".to_vec()
+        );
+        assert_eq!(
+            encode_release(MouseButton::Right, 4, 9, Mods::empty(), MouseEncoding::Sgr),
+            b"\x1b[<2;5;10m".to_vec()
         );
         // Drag adds the motion bit (0 + 32).
         assert_eq!(
@@ -333,9 +355,9 @@ mod tests {
             encode_press(MouseButton::Left, 4, 9, Mods::empty(), MouseEncoding::X10),
             vec![0x1b, b'[', b'M', 32, 37, 42]
         );
-        // Release: button 3.
+        // X10 release keeps the button-3 marker (no room for the button).
         assert_eq!(
-            encode_release(4, 9, Mods::empty(), MouseEncoding::X10),
+            encode_release(MouseButton::Left, 4, 9, Mods::empty(), MouseEncoding::X10),
             vec![0x1b, b'[', b'M', 35, 37, 42]
         );
         // X10 has no modifier bits: shift is ignored.

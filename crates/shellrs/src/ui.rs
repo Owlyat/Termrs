@@ -21,7 +21,11 @@ use crate::config::CursorShape;
 
 use crate::app::App;
 use crate::config::FxKind;
+use crate::image_gpu::Dot;
 use crate::workspace::{Node, SplitDir};
+
+use std::sync::Arc;
+use std::sync::Mutex;
 
 /// Draw whole app: menu bar, panes, prompt, overlays, fx transitions.
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -73,6 +77,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.ws_mut().set_tiled_rects(&tiled);
     let focused = app.ws().focused;
     let theme = app.theme_colors();
+    // Snapshot the shared braille dot list and clear it for this frame; the
+    // per-pane pass below refills it while blanking the braille font glyphs.
+    let braille = app.braille.clone();
+    if let Ok(mut b) = braille.lock() {
+        b.clear();
+    }
     for (id, rect) in &rects {
         let inner = Block::default().borders(Borders::ALL).inner(*rect);
         if inner.width >= 2 && inner.height >= 2 {
@@ -191,6 +201,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.effects.is_running() {
         app.effects.process_effects(tick, frame.buffer_mut(), area);
     }
+
+    // Braille cells are drawn as GPU dot quads instead of font glyphs (fonts
+    // leave inconsistent rows/columns gaps). Scanning the final buffer means
+    // overlays that cover a pane also suppress the dots they hide.
+    collect_braille(frame.buffer_mut(), area, area, &braille, theme.fg);
 }
 
 /// Big-text help card (tui-big-text banner + key reference).
@@ -342,6 +357,162 @@ fn normalize_block_cells(
             };
             cell.set_symbol(" ").set_fg(fill).set_bg(fill);
             cell.modifier.remove(Modifier::REVERSED);
+        }
+    }
+}
+
+/// Fraction of a braille sub-cell a dot fills (leaves a thin, even gap like a
+/// real font so rows/columns read as a grid instead of a solid slab).
+const BRAILLE_DOT_FILL: f32 = 0.85;
+
+/// Braille dot `bit` (0..=7) to its `(column, row)` inside the 2×4 cell.
+fn braille_dot_cell(bit: u8) -> (u8, u8) {
+    match bit {
+        0 => (0, 0),
+        1 => (0, 1),
+        2 => (0, 2),
+        3 => (1, 0),
+        4 => (1, 1),
+        5 => (1, 2),
+        6 => (0, 3),
+        _ => (1, 3),
+    }
+}
+
+/// Resolve a ratatui colour to sRGB bytes (`Reset` falls back to `reset`).
+fn color_rgb(c: Color, reset: [u8; 3]) -> [u8; 3] {
+    match c {
+        Color::Reset => reset,
+        Color::Black => [0, 0, 0],
+        Color::Red => [205, 0, 0],
+        Color::Green => [0, 205, 0],
+        Color::Yellow => [205, 205, 0],
+        Color::Blue => [0, 0, 238],
+        Color::Magenta => [205, 0, 205],
+        Color::Cyan => [0, 205, 205],
+        Color::Gray => [229, 229, 229],
+        Color::DarkGray => [127, 127, 127],
+        Color::LightRed => [255, 0, 0],
+        Color::LightGreen => [0, 255, 0],
+        Color::LightYellow => [255, 255, 0],
+        Color::LightBlue => [92, 92, 255],
+        Color::LightMagenta => [255, 0, 255],
+        Color::LightCyan => [0, 255, 255],
+        Color::White => [255, 255, 255],
+        Color::Rgb(r, g, b) => [r, g, b],
+        Color::Indexed(i) => indexed_rgb(i),
+    }
+}
+
+/// xterm 256-colour palette lookup.
+fn indexed_rgb(i: u8) -> [u8; 3] {
+    const BASE: [[u8; 3]; 16] = [
+        [0, 0, 0],
+        [205, 0, 0],
+        [0, 205, 0],
+        [205, 205, 0],
+        [0, 0, 238],
+        [205, 0, 205],
+        [0, 205, 205],
+        [229, 229, 229],
+        [127, 127, 127],
+        [255, 0, 0],
+        [0, 255, 0],
+        [255, 255, 0],
+        [92, 92, 255],
+        [255, 0, 255],
+        [0, 255, 255],
+        [255, 255, 255],
+    ];
+    match i {
+        0..=15 => BASE[i as usize],
+        16..=231 => {
+            let i = i - 16;
+            let steps = [0u8, 95, 135, 175, 215, 255];
+            [
+                steps[(i / 36) as usize],
+                steps[((i % 36) / 6) as usize],
+                steps[(i % 6) as usize],
+            ]
+        }
+        _ => {
+            let v = 8 + (i - 232) * 10;
+            [v, v, v]
+        }
+    }
+}
+
+/// sRGB bytes to linear RGBA (the sRGB surface re-encodes on write).
+fn srgb_to_linear(rgb: [u8; 3]) -> [f32; 4] {
+    let f = |v: u8| {
+        let c = v as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    [f(rgb[0]), f(rgb[1]), f(rgb[2]), 1.0]
+}
+
+/// Replace braille cells in `buf` with GPU dot quads.
+///
+/// Font braille glyphs do not fill their cell (advance/line-height and glyph
+/// coverage differ per font), so stacking them leaves inconsistent gaps
+/// between rows. Instead each set dot becomes a small quad, placed on the
+/// regular 2×4 sub-grid so the spacing is perfectly uniform in every
+/// direction. The font glyph is blanked so only the quads show.
+fn collect_braille(
+    buf: &mut ratatui::buffer::Buffer,
+    inner: Rect,
+    area: Rect,
+    out: &Arc<Mutex<Vec<Dot>>>,
+    reset: [u8; 3],
+) {
+    if inner.width == 0 || inner.height == 0 || area.width == 0 || area.height == 0 {
+        return;
+    }
+    let Ok(mut dots) = out.lock() else {
+        return;
+    };
+    let cols = area.width as f32;
+    let rows = area.height as f32;
+    let buf_area = buf.area;
+    let x_end = inner.x.saturating_add(inner.width).min(buf_area.width);
+    let y_end = inner.y.saturating_add(inner.height).min(buf_area.height);
+    for y in inner.y..y_end {
+        for x in inner.x..x_end {
+            let cell = &mut buf[(x, y)];
+            let Some(ch) = cell.symbol().chars().next() else {
+                continue;
+            };
+            let cp = ch as u32;
+            if !(0x2800..=0x28FF).contains(&cp) {
+                continue;
+            }
+            let pattern = (cp - 0x2800) as u8;
+            let color = srgb_to_linear(color_rgb(cell.fg, reset));
+            // The font glyph is replaced by the quads below.
+            cell.set_symbol(" ");
+            if pattern == 0 {
+                continue;
+            }
+            for bit in 0..8u8 {
+                if pattern & (1 << bit) == 0 {
+                    continue;
+                }
+                let (dx, dy) = braille_dot_cell(bit);
+                let cx = x as f32 + (dx as f32 + 0.5) * 0.5;
+                let cy = y as f32 + (dy as f32 + 0.5) * 0.25;
+                let ndc_x = cx / cols * 2.0 - 1.0;
+                let ndc_y = 1.0 - cy / rows * 2.0;
+                let hw = BRAILLE_DOT_FILL * 0.5 / cols;
+                let hh = BRAILLE_DOT_FILL * 0.25 / rows;
+                dots.push(Dot {
+                    ndc: [ndc_x - hw, ndc_y + hh, ndc_x + hw, ndc_y - hh],
+                    color,
+                });
+            }
         }
     }
 }
@@ -1280,5 +1451,74 @@ mod tests {
         normalize_block_cells(&mut buf, Rect::new(0, 0, 2, 1), test_theme());
         assert_eq!(buf[(0, 0)].symbol(), " ");
         assert_eq!(buf[(0, 0)].bg, Color::Rgb(220, 220, 220));
+    }
+
+    /// The Unicode braille bit layout maps to the 2×4 dot grid.
+    #[test]
+    fn braille_bits_map_to_grid() {
+        assert_eq!(braille_dot_cell(0), (0, 0));
+        assert_eq!(braille_dot_cell(1), (0, 1));
+        assert_eq!(braille_dot_cell(2), (0, 2));
+        assert_eq!(braille_dot_cell(3), (1, 0));
+        assert_eq!(braille_dot_cell(4), (1, 1));
+        assert_eq!(braille_dot_cell(5), (1, 2));
+        assert_eq!(braille_dot_cell(6), (0, 3));
+        assert_eq!(braille_dot_cell(7), (1, 3));
+    }
+
+    /// A braille cell is blanked and becomes one quad per set dot, colored
+    /// with the cell foreground; a blank braille and normal text are untouched.
+    #[test]
+    fn braille_cells_become_dots() {
+        use ratatui::buffer::Buffer;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        buf[(0, 0)]
+            .set_symbol("\u{28FF}")
+            .set_fg(Color::Green)
+            .set_bg(Color::Black);
+        buf[(1, 0)]
+            .set_symbol("\u{2800}")
+            .set_fg(Color::White)
+            .set_bg(Color::Black);
+        buf[(2, 0)]
+            .set_symbol("a")
+            .set_fg(Color::White)
+            .set_bg(Color::Black);
+        let out: Arc<Mutex<Vec<Dot>>> = Arc::new(Mutex::new(Vec::new()));
+        collect_braille(
+            &mut buf,
+            Rect::new(0, 0, 4, 1),
+            Rect::new(0, 0, 4, 1),
+            &out,
+            test_theme().fg,
+        );
+        assert_eq!(buf[(0, 0)].symbol(), " ", "braille glyph blanked");
+        assert_eq!(buf[(1, 0)].symbol(), " ", "blank braille blanked");
+        assert_eq!(buf[(2, 0)].symbol(), "a", "text untouched");
+        let dots = out.lock().unwrap();
+        assert_eq!(dots.len(), 8, "U+28FF has all eight dots");
+        for d in dots.iter() {
+            assert!(d.ndc[0] < d.ndc[2], "positive width");
+            assert!(d.ndc[1] > d.ndc[3], "positive height");
+            assert_eq!(d.color, srgb_to_linear([0, 205, 0]));
+        }
+    }
+
+    /// Outside the pane's inner rect nothing is collected.
+    #[test]
+    fn braille_ignores_outside_inner() {
+        use ratatui::buffer::Buffer;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        buf[(3, 0)].set_symbol("\u{28FF}").set_fg(Color::Green);
+        let out: Arc<Mutex<Vec<Dot>>> = Arc::new(Mutex::new(Vec::new()));
+        collect_braille(
+            &mut buf,
+            Rect::new(0, 0, 3, 1),
+            Rect::new(0, 0, 4, 1),
+            &out,
+            test_theme().fg,
+        );
+        assert_eq!(out.lock().unwrap().len(), 0);
+        assert_eq!(buf[(3, 0)].symbol(), "\u{28FF}");
     }
 }

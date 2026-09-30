@@ -38,13 +38,17 @@ pub fn load_set(configured: &str, fallbacks: &[String]) -> Result<FontSet, Strin
         // Symbol, emoji in Segoe UI Emoji, ...). Proportional files still
         // load (coverage matters more than advances for rare glyphs) but sort
         // last so common text never touches their advances.
-        for bytes in collect_auto_fallbacks(&fallback_candidates()) {
+        for mut bytes in collect_auto_fallbacks(&fallback_candidates()) {
+            normalize_fallback_metrics(primary, &mut bytes);
             set.push(Box::leak(bytes.into_boxed_slice()) as &'static [u8]);
         }
     } else {
         for f in fallbacks {
             match std::fs::read(f) {
-                Ok(bytes) => set.push(Box::leak(bytes.into_boxed_slice()) as &'static [u8]),
+                Ok(mut bytes) => {
+                    normalize_fallback_metrics(primary, &mut bytes);
+                    set.push(Box::leak(bytes.into_boxed_slice()) as &'static [u8]);
+                }
                 Err(e) => eprintln!("shellrs: cannot read fallback font {f:?}: {e}"),
             }
         }
@@ -53,6 +57,122 @@ pub fn load_set(configured: &str, fallbacks: &[String]) -> Result<FontSet, Strin
         primary,
         fallbacks: set,
     })
+}
+
+/// Widen a fallback's line metrics so it cannot shrink the terminal cell.
+///
+/// `ratatui-wgpu` derives the cell width as `advance('m') * size / height` and
+/// takes the **minimum over every font**, including fallbacks. A narrow Nerd
+/// Font fallback (JetBrains Mono at 0.6 em advance vs Cascadia's 0.504) then
+/// shrinks every cell and stretches the grid vertically, which makes braille
+/// dots (a fixed 2x4 sub-grid) visibly non-square -- and mismatches WezTerm,
+/// whose cell width comes from the primary font alone.
+///
+/// Only the fallback's `ascender - descender` is rescaled, never advances.
+/// `ratatui-wgpu` normalises each glyph's width to the cell, so a fallback
+/// glyph's rendered size depends only on its advance, not on `height()`:
+/// shrinking the height raises `char_width()` to match the primary while the
+/// drawn glyphs stay the same size (and the ascender/descender scale together,
+/// so the baseline does not move).
+fn normalize_fallback_metrics(primary: &[u8], fallback: &mut [u8]) {
+    let Some(r) = advance_ratio(primary) else {
+        return;
+    };
+    let Some(fr) = advance_ratio(fallback) else {
+        return;
+    };
+    if fr.0 / fr.1 >= r.0 / r.1 {
+        return;
+    }
+    // Target height that makes this font's cell width match the primary.
+    let target = (fr.0 / (r.0 / r.1)).floor() - 1.0;
+    if target <= 1.0 {
+        return;
+    }
+    let factor = target / fr.1;
+    let Some(dir) = sfnt_directory(fallback) else {
+        return;
+    };
+    if os2_uses_typographic_metrics(fallback, dir) {
+        if let Some((off, len)) = find_table(fallback, dir, b"OS/2")
+            && len >= 72
+        {
+            scale_i16(fallback, off + 68, factor); // sTypoAscender
+            scale_i16(fallback, off + 70, factor); // sTypoDescender
+        }
+    } else if let Some((off, len)) = find_table(fallback, dir, b"hhea")
+        && len >= 8
+    {
+        scale_i16(fallback, off + 4, factor); // ascender
+        scale_i16(fallback, off + 6, factor); // descender
+    }
+}
+
+/// `(advance('m'), height())` for a font, used for the cell-width ratio.
+fn advance_ratio(bytes: &[u8]) -> Option<(f32, f32)> {
+    let face = rustybuzz::Face::from_slice(bytes, 0)?;
+    let gid = face.glyph_index('m')?;
+    let adv = face.glyph_hor_advance(gid).unwrap_or(0) as f32;
+    let height = face.height() as f32;
+    (adv > 0.0 && height > 0.0).then_some((adv, height))
+}
+
+/// Whether the OS/2 `USE_TYPO_METRICS` bit selects the typographic metrics
+/// (ttf-parser's `ascender()`/`descender()` consult it).
+fn os2_uses_typographic_metrics(bytes: &[u8], dir: usize) -> bool {
+    let Some((off, len)) = find_table(bytes, dir, b"OS/2") else {
+        return false;
+    };
+    if len < 64 || off + 64 > bytes.len() {
+        return false;
+    }
+    u16::from_be_bytes([bytes[off + 62], bytes[off + 63]]) & 0x80 != 0
+}
+
+/// Multiply the big-endian `i16` at `at` by `factor` in place.
+fn scale_i16(bytes: &mut [u8], at: usize, factor: f32) {
+    if at + 2 > bytes.len() {
+        return;
+    }
+    let v = i16::from_be_bytes([bytes[at], bytes[at + 1]]) as f32;
+    let nv = (v * factor).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    bytes[at..at + 2].copy_from_slice(&nv.to_be_bytes());
+}
+
+/// Offset of the first font's table directory (handles `ttcf` collections).
+fn sfnt_directory(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 12 {
+        return None;
+    }
+    if &bytes[0..4] == b"ttcf" {
+        let off = read_u32(bytes, 12)? as usize;
+        (off < bytes.len()).then_some(off)
+    } else {
+        Some(0)
+    }
+}
+
+/// `(offset, length)` of a table record in the directory at `dir`.
+fn find_table(bytes: &[u8], dir: usize, tag: &[u8; 4]) -> Option<(usize, usize)> {
+    if dir + 12 > bytes.len() {
+        return None;
+    }
+    let num = u16::from_be_bytes([bytes[dir + 4], bytes[dir + 5]]) as usize;
+    for i in 0..num {
+        let rec = dir + 12 + i * 16;
+        if rec + 16 > bytes.len() {
+            return None;
+        }
+        if &bytes[rec..rec + 4] == tag {
+            return Some((read_u32(bytes, rec + 8)? as usize, read_u32(bytes, rec + 12)? as usize));
+        }
+    }
+    None
+}
+
+fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    let b = bytes.get(at..at + 4)?;
+    Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// One installed font file: display name (file stem) plus full path.
@@ -490,6 +610,44 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn char_width(bytes: &[u8], size: u32) -> u32 {
+        match advance_ratio(bytes) {
+            Some((adv, height)) => (adv * size as f32 / height) as u32,
+            None => 0,
+        }
+    }
+
+    /// `normalize_fallback_metrics` never lowers the cell width a fallback
+    /// would impose, so the primary font wins the `min` and cells stay 2:1.
+    #[test]
+    fn normalize_fallback_metrics_keeps_primary_width() {
+        // Real primary + fallbacks when installed (vacuous otherwise).
+        let Some(primary_path) = candidates().into_iter().find(|p| p.is_file()) else {
+            return;
+        };
+        let primary = std::fs::read(&primary_path).unwrap();
+        if advance_ratio(&primary).is_none() {
+            return;
+        }
+        let target_w = char_width(&primary, 26);
+        for p in fallback_candidates().into_iter().filter(|p| p.is_file()) {
+            let mut b = std::fs::read(&p).unwrap();
+            let before = char_width(&b, 26);
+            normalize_fallback_metrics(&primary, &mut b);
+            let after = char_width(&b, 26);
+            assert!(
+                after >= before,
+                "{} shrank: {before} -> {after}",
+                p.display()
+            );
+            assert!(
+                after >= target_w,
+                "{} still narrower than primary ({after} < {target_w})",
+                p.display()
+            );
+        }
     }
 
     #[test]

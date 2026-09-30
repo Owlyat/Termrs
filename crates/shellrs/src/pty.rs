@@ -11,6 +11,8 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, bounded};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::keys::{KeyKind, KeyPress, to_bytes};
+
 /// Default size before first layout assigns real rows/cols.
 const FALLBACK_ROWS: u16 = 24;
 const FALLBACK_COLS: u16 = 80;
@@ -73,6 +75,10 @@ pub struct Pane {
     shell_kind: ShellKind,
     /// When the last chunk arrived, for the command-gap heuristic.
     last_out: std::time::Instant,
+    /// ConPTY requested `win32-input-mode` (`CSI ? 9001 h`). When set, keys are
+    /// forwarded as win32 input records so the child sees key press *and*
+    /// release with real timing (held keys, sliders, modifiers).
+    win32_input_mode: bool,
 }
 
 /// How the child shell spells a "print my cwd" command.
@@ -111,9 +117,15 @@ const DSR_STATUS_REPLY: &[u8] = b"\x1b[0n";
 /// stretched on top of being cell-based.
 const CELL_SIZE: &[u8] = b"\x1b[16t";
 
+/// ConPTY asks the terminal to switch keyboard input into `win32-input-mode`
+/// on startup (`CSI ? 9001 h` / `l`). Honouring it is what preserves key-up
+/// events; without it a hosted console app never sees a key release.
+const WIN32_INPUT_ON: &[u8] = b"\x1b[?9001h";
+const WIN32_INPUT_OFF: &[u8] = b"\x1b[?9001l";
+
 /// Bytes kept across chunks so a query split over two reads is still seen.
-/// Longest query is `CELL_SIZE` (6 bytes); keep a little more for safety.
-const QUERY_TAIL_KEEP: usize = 8;
+/// Longest sequence is `WIN32_INPUT_ON` (8 bytes); keep a little more.
+const QUERY_TAIL_KEEP: usize = 12;
 
 /// Toggle shellrs's own Ctrl+C immunity (see `install_console_guard`).
 #[cfg(windows)]
@@ -313,6 +325,7 @@ impl Pane {
             cwd_seq: 0,
             shell_kind,
             last_out: std::time::Instant::now(),
+            win32_input_mode: false,
         })
     }
 
@@ -470,6 +483,20 @@ impl Pane {
         scan.extend_from_slice(&self.query_tail);
         scan.extend_from_slice(bytes);
         let (dsr, status, cell) = count_queries(&scan);
+        // ConPTY requests win32-input-mode on startup; track it so key events
+        // can be forwarded as win32 records (press *and* release).
+        let mode = match (rfind(&scan, WIN32_INPUT_ON), rfind(&scan, WIN32_INPUT_OFF)) {
+            (Some(on), Some(off)) => Some(on > off),
+            (Some(_), None) => Some(true),
+            (None, Some(_)) => Some(false),
+            (None, None) => None,
+        };
+        if let Some(mode) = mode
+            && mode != self.win32_input_mode
+        {
+            self.win32_input_mode = mode;
+            log::info!("pane {}: win32-input-mode {}", self.id, if mode { "on" } else { "off" });
+        }
         // Keep a short tail in case an escape is split across chunks.
         let keep = QUERY_TAIL_KEEP.min(scan.len());
         self.query_tail = scan[scan.len() - keep..].to_vec();
@@ -644,6 +671,65 @@ impl Pane {
         self.track_input(bytes);
         let _ = self.writer.write_all(bytes);
         let _ = self.writer.flush();
+    }
+
+    /// Forward one key event to the child.
+    ///
+    /// When ConPTY asked for `win32-input-mode`, press/repeat/release each
+    /// become a win32 input record (so the child sees a held key and its
+    /// release). Otherwise the legacy VT encoding is used; releases have no VT
+    /// representation and are dropped.
+    pub fn write_key(&mut self, press: &KeyPress) {
+        if self.dead {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            if self.win32_input_mode {
+                let bytes = crate::keys::to_win32_bytes(press);
+                // No virtual key (IME/composed text): fall back to raw text.
+                if bytes.is_empty() {
+                    if press.kind != KeyKind::Release
+                        && press.text.as_deref().is_some_and(|t| !t.is_empty())
+                    {
+                        self.write(&to_bytes(press));
+                    }
+                    return;
+                }
+                {
+                    if self.parser.screen().scrollback() > 0 {
+                        self.parser.screen_mut().set_scrollback(0);
+                    }
+                    let _ = self.writer.write_all(&bytes);
+                    let _ = self.writer.flush();
+                    // Keep the typed-line tracker in sync (win32 records are
+                    // not literal bytes, so the normal path cannot track them).
+                    if press.kind != KeyKind::Release
+                        && !press.mods.contains(crate::keys::Mods::CONTROL)
+                        && !press.mods.contains(crate::keys::Mods::ALT)
+                    {
+                        let mut t = Vec::new();
+                        match press.key {
+                            crate::keys::Key::Char(c) if !c.is_control() => {
+                                let mut buf = [0u8; 4];
+                                t.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                            }
+                            crate::keys::Key::Space => t.push(b' '),
+                            crate::keys::Key::Backspace => t.push(0x7f),
+                            crate::keys::Key::Enter => t.push(b'\r'),
+                            _ => {}
+                        }
+                        if !t.is_empty() {
+                            self.track_input(&t);
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        if press.kind != KeyKind::Release {
+            self.write(&to_bytes(press));
+        }
     }
 
     /// Track the line being typed so the shell's echo can be recognized.
@@ -850,6 +936,32 @@ fn count_queries(data: &[u8]) -> (usize, usize, usize) {
         data.windows(needle.len()).filter(|w| *w == needle).count()
     };
     (count(DSR), count(DSR_STATUS), count(CELL_SIZE))
+}
+
+/// Last index of `needle` in `hay` (`None` when absent).
+fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).rposition(|w| w == needle)
+}
+
+#[cfg(test)]
+mod win32_mode_tests {
+    use super::*;
+
+    /// The mode toggle is found wherever it appears (last wins), including a
+    /// sequence glued to other output.
+    #[test]
+    fn detects_win32_input_mode_toggle() {
+        assert_eq!(rfind(b"ab\x1b[?9001hcd", WIN32_INPUT_ON), Some(2));
+        assert_eq!(rfind(b"ab\x1b[?9001hcd", WIN32_INPUT_OFF), None);
+        assert_eq!(rfind(b"\x1b[?9001l", WIN32_INPUT_OFF), Some(0));
+        // Both present: the later one decides.
+        let mut both = b"\x1b[?9001h".to_vec();
+        both.extend_from_slice(b"\x1b[?9001l");
+        assert!(rfind(&both, WIN32_INPUT_OFF) > rfind(&both, WIN32_INPUT_ON));
+    }
 }
 
 /// Mark pasted text with bracketed-paste markers when requested.
