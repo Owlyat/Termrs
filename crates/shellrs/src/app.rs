@@ -1795,10 +1795,25 @@ impl App {
     }
 
     /// Persist the layout, finishing any playing close transition first so
-    /// the saved tree never contains a pane the user already closed.
-    pub fn save_layout(&mut self) {
+    /// the saved tree never contains a pane the user already closed. Returns
+    /// the filesystem error so the caller can show it.
+    pub fn save_layout(&mut self) -> Result<(), String> {
         self.complete_closing();
-        LayoutFile::from_workspaces(&self.workspaces).save(&self.layout_path);
+        let file = LayoutFile::from_workspaces(&self.workspaces);
+        match file.save(&self.layout_path) {
+            Ok(()) => {
+                log::info!(
+                    "layout saved to {} ({} workspace(s))",
+                    self.layout_path.display(),
+                    file.workspaces.len()
+                );
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("layout save failed: {e}");
+                Err(e)
+            }
+        }
     }
 
     /// Finish every playing close transition immediately (forced removal).
@@ -3913,8 +3928,10 @@ impl App {
             Command::Commands => self.open_commands(),
             Command::SaveCommand => self.open_command_form(),
             Command::SaveLayout => {
-                self.save_layout();
-                self.status = format!("layout saved to {}", self.layout_path.display());
+                self.status = match self.save_layout() {
+                    Ok(()) => format!("layout saved to {}", self.layout_path.display()),
+                    Err(e) => format!("layout save failed: {e}"),
+                };
             }
             Command::YankLast => self.yank_last_output(),
             Command::SelectMode => self.toggle_select(),
@@ -6236,6 +6253,36 @@ mod tests {
         }
         app.handle_key(key(Key::Enter, Mods::empty()));
         assert!(app.should_quit, "typing 'quit' then enter quits");
+        for w in &mut app.workspaces {
+            w.kill_all();
+        }
+        let _ = std::fs::remove_file(&layout);
+        rt.shutdown_background();
+    }
+
+    /// Running "Save layout" from the palette writes the file straight away.
+    #[test]
+    fn palette_save_layout_writes_immediately() {
+        let _guard = crate::pty::lock_pty_tests();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (wake, _rx) = crossbeam_channel::unbounded::<()>();
+        let layout = unique_temp_path("palette-savelayout");
+        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
+            .expect("app boots");
+        assert!(!layout.is_file(), "nothing written before the command");
+        app.handle_key(key(Key::Char('p'), Mods::CONTROL)); // command palette
+        for c in "save layout".chars() {
+            app.handle_key(key(Key::Char(c), Mods::empty()));
+        }
+        app.handle_key(key(Key::Enter, Mods::empty()));
+        assert!(
+            layout.is_file() && app.status.starts_with("layout saved"),
+            "status: {}",
+            app.status
+        );
         for w in &mut app.workspaces {
             w.kill_all();
         }

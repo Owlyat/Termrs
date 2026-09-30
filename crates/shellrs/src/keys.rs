@@ -402,6 +402,16 @@ fn virtual_key(press: &KeyPress) -> u16 {
 /// natural character); 0 for pure navigation keys.
 #[cfg(windows)]
 fn unicode_char(press: &KeyPress) -> u16 {
+    // A win32 KEY_EVENT_RECORD for Ctrl+<letter> carries the *control
+    // character* (Ctrl+P -> 0x10), not the base letter. ConPTY translates the
+    // record straight back to VT, so sending 'p' here makes a hosted TUI see a
+    // plain 'p' instead of Ctrl+P.
+    if press.mods.contains(Mods::CONTROL) {
+        return match press.key {
+            Key::Char(c) => ctrl_byte(c).map(u16::from).unwrap_or(0),
+            _ => 0,
+        };
+    }
     if let Some(ch) = press.text.as_deref().and_then(|t| t.chars().next()) {
         let mut buf = [0u16; 2];
         for u in ch.encode_utf16(&mut buf) {
@@ -828,5 +838,23 @@ mod tests {
         assert_eq!(down[3], "1"); // bKeyDown
         assert_eq!(up[3], "0"); // key up
         assert!(down[0].parse::<u32>().unwrap() > 0, "virtual key code present");
+    }
+
+    /// Ctrl+<letter> must carry the control character (Ctrl+P -> 0x10), not the
+    /// base letter, or ConPTY hands a plain letter to the hosted app.
+    #[cfg(windows)]
+    #[test]
+    fn win32_ctrl_letter_uses_control_char() {
+        let p = KeyPress {
+            key: Key::Char('p'),
+            mods: Mods::CONTROL,
+            text: Some("p".into()),
+            kind: KeyKind::Press,
+        };
+        let text = String::from_utf8(to_win32_bytes(&p)).unwrap();
+        let body = text.strip_prefix("\x1b[").unwrap().strip_suffix("_").unwrap();
+        let params: Vec<&str> = body.split(';').collect();
+        assert_eq!(params[2], "16", "Ctrl+P must send UnicodeChar 0x10");
+        assert_eq!(params[4], "8", "Ctrl state bit set");
     }
 }

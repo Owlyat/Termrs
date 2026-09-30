@@ -100,16 +100,18 @@ impl LayoutFile {
         }
     }
 
-    /// Write the layout; failures are reported but never fatal.
-    pub fn save(&self, path: &Path) {
-        match toml::to_string_pretty(self) {
-            Ok(text) => {
-                if let Err(e) = std::fs::write(path, text) {
-                    eprintln!("shellrs: cannot save layout {}: {e}", path.display());
-                }
-            }
-            Err(e) => eprintln!("shellrs: cannot serialize layout: {e}"),
+    /// Write the layout. The parent directory is created on demand; errors are
+    /// returned so the caller can surface them (a locked/read-only file used
+    /// to fail silently on stderr).
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        let text = toml::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
+        std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
     }
 
     /// Snapshot the live workspaces into a saveable file.
@@ -221,7 +223,7 @@ mod tests {
             "shellrs-layout-{}-{nanos}.toml",
             std::process::id()
         ));
-        file.save(&path);
+        file.save(&path).expect("layout saves");
 
         let loaded = LayoutFile::load(&path).expect("layout loads");
         assert_eq!(loaded.workspaces[0].dirs, file.workspaces[0].dirs);
