@@ -17,8 +17,8 @@ mod substitute;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: lp for <var> --in <source> [--enumerate <index>] [--if ( <command> )] [--while ( <command> )] { <command> }
-        lp for <var> --in_cmd ( <command> ) [--enumerate <index>] [--if ( <command> )] [--while ( <command> )] { <command> }
+usage: lp for <var> --in <source> [--enumerate <index>] [--if [not] ( <command> )] [--while [not] ( <command> )] { <command> }
+        lp for <var> --in_cmd ( <command> ) [--enumerate <index>] [--if [not] ( <command> )] [--while [not] ( <command> )] { <command> }
 
   <source> may be:
     an integer N           iterate 0..=N
@@ -33,10 +33,13 @@ usage: lp for <var> --in <source> [--enumerate <index>] [--if ( <command> )] [--
   --enumerate binds a second variable to the 1-based iteration index.
 
   --if runs <command> per value (with $var substituted) and runs the block
-    only when it exits 0. Output of the condition is discarded.
+    only when it exits 0. Add 'not' (--if not (...)) to invert the test and
+    run the block only when it exits non-0. A clean non-zero exit skips the
+    value, while a non-zero exit with stderr aborts the loop with an error.
 
   --while runs <command> per value (with $var substituted) and stops the loop
-    at the first value where it exits non-0. Forces sequential execution.
+    at the first value where it exits non-0. Add 'not' (--while not (...))
+    to stop at the first value where it exits 0. Forces sequential execution.
 
   <var> and <index> are available inside the block and the conditions
   as $name, ${name} or %name%.

@@ -78,7 +78,7 @@ fn run_into<O: Write, E: Write>(command: &str, out: &mut O, err: &mut E) -> Resu
         .par_iter()
         .map(|job| {
             if let Some(filter) = &job.filter {
-                if !run_condition(filter)? {
+                if !eval_filter(&filter.command, filter.negate)? {
                     return Ok(Captured {
                         stdout: Vec::new(),
                         stderr: Vec::new(),
@@ -109,17 +109,14 @@ fn run_sequential<O: Write, E: Write>(
 ) -> Result<(), String> {
     for (index, value) in values.into_iter().enumerate() {
         if let Some(cond) = &invocation.while_cond {
-            let rendered = substitute_template(cond, invocation, index, &value);
-            if rendered.trim().is_empty() {
-                break;
-            }
-            if !run_condition(&rendered)? {
+            let rendered = substitute_template(&cond.command, invocation, index, &value);
+            if !eval_filter(&rendered, cond.negate)? {
                 break;
             }
         }
         if let Some(cond) = &invocation.filter {
-            let rendered = substitute_template(cond, invocation, index, &value);
-            if rendered.trim().is_empty() || !run_condition(&rendered)? {
+            let rendered = substitute_template(&cond.command, invocation, index, &value);
+            if !eval_filter(&rendered, cond.negate)? {
                 continue;
             }
         }
@@ -140,7 +137,13 @@ fn run_sequential<O: Write, E: Write>(
 /// One rendered job for the parallel (`--if`-only) path.
 struct Job {
     block: String,
-    filter: Option<String>,
+    filter: Option<JobFilter>,
+}
+
+/// A substituted `--if` condition with its negation flag preserved.
+struct JobFilter {
+    command: String,
+    negate: bool,
 }
 
 /// Substitute the loop variable and optional index into each value, dropping
@@ -156,8 +159,9 @@ fn render_jobs(invocation: &cli::Invocation, values: Vec<String>) -> Vec<Job> {
             if block.is_empty() {
                 return None;
             }
-            let filter = invocation.filter.as_ref().map(|cond| {
-                substitute_template(cond, invocation, index, &value)
+            let filter = invocation.filter.as_ref().map(|cond| JobFilter {
+                command: substitute_template(&cond.command, invocation, index, &value),
+                negate: cond.negate,
             });
             Some(Job { block, filter })
         })
@@ -203,8 +207,23 @@ fn capture_command(command: &str) -> Result<Captured, String> {
     })
 }
 
+/// Evaluate a rendered condition, applying `not` negation.
+///
+/// An empty render counts as false before negation, so `--if not` runs the
+/// block while plain `--if` skips it.
+fn eval_filter(rendered: &str, negate: bool) -> Result<bool, String> {
+    if rendered.trim().is_empty() {
+        return Ok(negate);
+    }
+    let passed = run_condition(rendered)?;
+    Ok(if negate { !passed } else { passed })
+}
+
 /// Run a condition command (already substituted) and report whether it exited 0.
-/// Output is discarded; only the exit status matters.
+///
+/// Exit 0 means pass. A clean non-zero exit (no stderr) means filter-false.
+/// A non-zero exit with stderr means the condition itself errored, so return
+/// `Err` with the stderr text instead of silently skipping every value.
 fn run_condition(condition: &str) -> Result<bool, String> {
     if is_lp_invocation(condition) {
         let mut stdout = Vec::new();
@@ -222,7 +241,15 @@ fn run_condition(condition: &str) -> Result<bool, String> {
     let output = child
         .output()
         .map_err(|e| format!("failed to run '{condition}': {e}"))?;
-    Ok(output.status.success())
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        return Err(format!("condition '{condition}' failed: {stderr}"));
+    }
+    Ok(false)
 }
 
 /// Whether a command is another `lp` invocation handled in-process.

@@ -13,6 +13,13 @@ pub enum Source {
     Command(String),
 }
 
+/// A per-value condition with optional negation (`--if not (...)`).
+#[derive(Debug, Clone)]
+pub struct Condition {
+    pub command: String,
+    pub negate: bool,
+}
+
 /// A parsed loop invocation.
 #[derive(Debug, Clone)]
 pub struct Invocation {
@@ -21,10 +28,10 @@ pub struct Invocation {
     pub block: String,
     /// Optional variable receiving the 1-based iteration index.
     pub enumerate: Option<String>,
-    /// Optional per-value filter: run the block only when this command exits 0.
-    pub filter: Option<String>,
-    /// Optional per-value break condition: stop the loop when this command exits non-0.
-    pub while_cond: Option<String>,
+    /// Optional per-value filter: run the block only when this condition passes.
+    pub filter: Option<Condition>,
+    /// Optional per-value break condition: stop the loop when this condition fails.
+    pub while_cond: Option<Condition>,
 }
 
 /// Parse a full invocation string (with or without the leading program name).
@@ -81,9 +88,9 @@ pub fn parse(command: &str) -> Result<Invocation, String> {
     })
 }
 
-/// Parse the optional `--enumerate <var>`, `--if (cmd)` and `--while (cmd)`
-/// clauses after the source, in any order.
-fn parse_clauses(input: &str) -> Result<(Option<String>, Option<String>, Option<String>, &str), String> {
+/// Parse the optional `--enumerate <var>`, `--if [not] (cmd)` and
+/// `--while [not] (cmd)` clauses after the source, in any order.
+fn parse_clauses(input: &str) -> Result<(Option<String>, Option<Condition>, Option<Condition>, &str), String> {
     let mut rest = input;
     let mut enumerate = None;
     let mut filter = None;
@@ -125,9 +132,22 @@ fn parse_clauses(input: &str) -> Result<(Option<String>, Option<String>, Option<
     Ok((enumerate, filter, while_cond, rest))
 }
 
-/// Parse a `( <command> )` condition after `--if` / `--while`.
-fn parse_cond_command<'a>(input: &'a str, flag: &str) -> Result<(String, &'a str), String> {
-    let trimmed = input.trim_start();
+/// Parse a `[not] ( <command> )` condition after `--if` / `--while`.
+/// A leading `not` (or `!`) negates the exit-status test.
+fn parse_cond_command<'a>(input: &'a str, flag: &str) -> Result<(Condition, &'a str), String> {
+    let mut rest = input.trim_start();
+    let mut negate = false;
+    if let Some((token, after_token)) = peek_token(rest) {
+        if token.eq_ignore_ascii_case("not") || token == "!" {
+            // Only treat it as negation when a '(' follows; otherwise let the
+            // paren check below report the missing '(' error.
+            if after_token.trim_start().starts_with('(') {
+                negate = true;
+                rest = after_token;
+            }
+        }
+    }
+    let trimmed = rest.trim_start();
     if !trimmed.starts_with('(') {
         return Err(format!("expected '( ... )' after '{flag}'"));
     }
@@ -136,7 +156,7 @@ fn parse_cond_command<'a>(input: &'a str, flag: &str) -> Result<(String, &'a str
     if cmd.is_empty() {
         return Err(format!("empty condition after '{flag}'"));
     }
-    Ok((cmd, rest))
+    Ok((Condition { command: cmd, negate }, rest))
 }
 
 /// Whether a token names this program (`lp`, `lp.exe`, or a path to it).

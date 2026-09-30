@@ -1,3 +1,46 @@
 [workspace]
 members = ["crates/lp", "crates/kalk", "crates/piper"]
 resolver = "2"
+
+[package]
+name = "shellrs"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "shellrs"
+path = "crates/shellrs/src/main.rs"
+
+[dependencies]
+ratatui = "0.30"
+ratatui-wgpu = "0.5"
+winit = "0.30"
+pollster = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+crossbeam-channel = "0.5"
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+arboard = "2"
+fuzzy-matcher = "0.3"
+unicode-width = "0.2"
+portable-pty = "0.9"
+tui-term = "0.3"
+throbber-widgets-tui = "0.11"
+tachyonfx = "0.25"
+ratatui-textarea = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+tui-big-text = "0.8"
+tui-menu = "0.3"
+tui-scrollview = "0.6"
+vt100 = "0.16"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_IO", "Win32_Security"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde_json = "1.0.151"
+deunicode = "1.6.2"
+rustybuzz = "0.20.1"
+fontdue = "0.9.4"
+open = "5.4.4"
+tiny_http = "0.12.0"
+ureq = "2"
