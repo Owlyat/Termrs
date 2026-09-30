@@ -44,3 +44,9 @@ fontdue = "0.9.4"
 open = "5.4.4"
 tiny_http = "0.12.0"
 ureq = "2"
+
+# Vendored to drop PSUEDOCONSOLE_INHERIT_CURSOR from CreatePseudoConsole:
+# upstream's flag makes every new ConPTY inherit the previous console's input
+# line, so panes start with the last command (e.g. Clink) already in the prompt.
+[patch.crates-io]
+portable-pty = { path = "vendor/portable-pty" }
