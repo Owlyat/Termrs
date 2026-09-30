@@ -119,11 +119,10 @@ pub fn parse_sheet(text: &str) -> Vec<CheatEntry> {
         }
         // A command line: strip a `$ ` prompt prefix (`$HOME` is not one).
         let mut cmd = line;
-        if let Some(rest) = cmd.strip_prefix('$') {
-            if rest.is_empty() || rest.starts_with([' ', '\t']) {
+        if let Some(rest) = cmd.strip_prefix('$')
+            && (rest.is_empty() || rest.starts_with([' ', '\t'])) {
                 cmd = rest.trim_start();
             }
-        }
         if cmd.is_empty() || cmd.len() > MAX_LINE {
             continue;
         }
@@ -147,14 +146,13 @@ pub fn parse_sheet(text: &str) -> Vec<CheatEntry> {
 /// a known source prefix plus a spaceless topic. Never a runnable command,
 /// so it is skipped instead of imported.
 fn is_section_header(line: &str) -> bool {
-    if let Some((src, topic)) = line.split_once(':') {
-        if matches!(src, "cheat" | "tldr")
+    if let Some((src, topic)) = line.split_once(':')
+        && matches!(src, "cheat" | "tldr")
             && !topic.is_empty()
             && !topic.contains([' ', '\t'])
         {
             return true;
         }
-    }
     // Bare `name:` label, if a sheet ever uses one.
     if let Some(name) = line.strip_suffix(':') {
         return !name.is_empty()
@@ -216,12 +214,11 @@ fn sanitize_name(inner: &str) -> String {
         if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
             name.push(c);
             gap = false;
-        } else if matches!(c, ' ' | '\t' | '.' | '/' | ':' | '+' | '\\') {
-            if !gap {
+        } else if matches!(c, ' ' | '\t' | '.' | '/' | ':' | '+' | '\\')
+            && !gap {
                 name.push('_');
                 gap = true;
             }
-        }
     }
     name.trim_matches('_').to_string()
 }

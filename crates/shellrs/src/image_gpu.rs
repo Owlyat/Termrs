@@ -453,7 +453,7 @@ impl PostProcessor for ImagePostProcessor {
             surface_config.format,
             surface_config.alpha_mode
         );
-        let transparent = surface_config.alpha_mode != wgpu::CompositeAlphaMode::Opaque;
+        let _transparent = surface_config.alpha_mode != wgpu::CompositeAlphaMode::Opaque;
         let linear = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shellrs sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -548,11 +548,10 @@ impl PostProcessor for ImagePostProcessor {
         if let (Some(o), Some(rect)) = (&self.overlay, self.rect) {
             self.write_image_params(queue, o, self.ndc_for(rect, sw, sh), 1.0);
         }
-        if let (Some(_), Some(rect)) = (&self.cursor, self.cursor_rect) {
-            if let Some(c) = &self.cursor {
+        if let (Some(_), Some(rect)) = (&self.cursor, self.cursor_rect)
+            && let Some(c) = &self.cursor {
                 self.write_image_params(queue, c, self.ndc_for(rect, sw, sh), 1.0);
             }
-        }
 
         // Braille dots are solid quads drawn over the text (the UI blanks the
         // font glyphs). Uploaded through a cached, growable vertex buffer.
@@ -621,29 +620,26 @@ impl PostProcessor for ImagePostProcessor {
         pass.set_bind_group(0, &text_bg, &[]);
         pass.draw(0..3, 0..1);
         // 3. Braille dots (geometric; their font glyphs were blanked by the ui).
-        if braille_count > 0 {
-            if let Some(buf) = &self.braille_buffer {
+        if braille_count > 0
+            && let Some(buf) = &self.braille_buffer {
                 pass.set_pipeline(&self.braille);
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..braille_count, 0..1);
             }
-        }
         // 4. Overlay image (ctrl+i viewer) on top.
-        if let (Some(o), Some(rect)) = (&self.overlay, self.rect) {
-            if rect.2 > 1.0 && rect.3 > 1.0 {
+        if let (Some(o), Some(rect)) = (&self.overlay, self.rect)
+            && rect.2 > 1.0 && rect.3 > 1.0 {
                 pass.set_pipeline(&self.image.pipeline);
                 pass.set_bind_group(0, &o.bind_group, &[]);
                 pass.draw(0..4, 0..1);
             }
-        }
         // 5. Terminal cursor (bar/underline) above everything.
-        if let (Some(c), Some(rect)) = (&self.cursor, self.cursor_rect) {
-            if rect.2 >= 1.0 && rect.3 >= 1.0 {
+        if let (Some(c), Some(rect)) = (&self.cursor, self.cursor_rect)
+            && rect.2 >= 1.0 && rect.3 >= 1.0 {
                 pass.set_pipeline(&self.image.pipeline);
                 pass.set_bind_group(0, &c.bind_group, &[]);
                 pass.draw(0..4, 0..1);
             }
-        }
     }
 
     fn needs_update(&self) -> bool {

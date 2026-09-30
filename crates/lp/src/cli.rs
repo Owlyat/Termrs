@@ -38,11 +38,10 @@ pub struct Invocation {
 pub fn parse(command: &str) -> Result<Invocation, String> {
     let mut rest = command.trim();
 
-    if let Some((token, after)) = peek_token(rest) {
-        if is_lp_name(&token) {
+    if let Some((token, after)) = peek_token(rest)
+        && is_lp_name(&token) {
             rest = after;
         }
-    }
 
     let (keyword, after) = next_token(rest)?;
     if keyword != "for" && keyword != "--for" {
@@ -88,18 +87,18 @@ pub fn parse(command: &str) -> Result<Invocation, String> {
     })
 }
 
+/// Parsed `--enumerate` / `--if` / `--while` clauses plus the remaining text.
+type Clauses<'a> = (Option<String>, Option<Condition>, Option<Condition>, &'a str);
+
 /// Parse the optional `--enumerate <var>`, `--if [not] (cmd)` and
 /// `--while [not] (cmd)` clauses after the source, in any order.
-fn parse_clauses(input: &str) -> Result<(Option<String>, Option<Condition>, Option<Condition>, &str), String> {
+fn parse_clauses(input: &str) -> Result<Clauses<'_>, String> {
     let mut rest = input;
     let mut enumerate = None;
     let mut filter = None;
     let mut while_cond = None;
 
-    loop {
-        let Some((token, after_token)) = peek_token(rest) else {
-            break;
-        };
+    while let Some((token, after_token)) = peek_token(rest) {
         match token.as_str() {
             "--enumerate" => {
                 if enumerate.is_some() {
@@ -137,8 +136,8 @@ fn parse_clauses(input: &str) -> Result<(Option<String>, Option<Condition>, Opti
 fn parse_cond_command<'a>(input: &'a str, flag: &str) -> Result<(Condition, &'a str), String> {
     let mut rest = input.trim_start();
     let mut negate = false;
-    if let Some((token, after_token)) = peek_token(rest) {
-        if token.eq_ignore_ascii_case("not") || token == "!" {
+    if let Some((token, after_token)) = peek_token(rest)
+        && (token.eq_ignore_ascii_case("not") || token == "!") {
             // Only treat it as negation when a '(' follows; otherwise let the
             // paren check below report the missing '(' error.
             if after_token.trim_start().starts_with('(') {
@@ -146,7 +145,6 @@ fn parse_cond_command<'a>(input: &'a str, flag: &str) -> Result<(Condition, &'a 
                 rest = after_token;
             }
         }
-    }
     let trimmed = rest.trim_start();
     if !trimmed.starts_with('(') {
         return Err(format!("expected '( ... )' after '{flag}'"));

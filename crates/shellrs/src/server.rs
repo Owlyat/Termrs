@@ -8,7 +8,7 @@
 //!   GET  /screenshot — get PNG screenshot of the terminal
 
 use crossbeam_channel::{Receiver, Sender};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tiny_http::{Header, Method, Request, Response, Server};
 
 /// Key press request body.
@@ -23,16 +23,6 @@ pub struct KeyRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommandRequest {
     pub command: String,
-}
-
-/// Status response (terminal text).
-#[derive(Debug, Clone, Serialize)]
-pub struct StatusResponse {
-    pub workspace: usize,
-    pub pane_id: usize,
-    pub text: String,
-    pub rows: u16,
-    pub cols: u16,
 }
 
 /// Commands the HTTP server sends to the app.

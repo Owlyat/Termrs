@@ -102,7 +102,7 @@ fn load_last_output_from(path: &std::path::Path) -> Option<Vec<u8>> {
 /// `PIPER_*` vars, print its path. Safe names work with
 /// `call` (cmd) / `source` (sh); numeric `%1%` can't be set from child.
 pub fn write_fallback_script(data: &Parsed) -> PathBuf {
-    let mut path = PathBuf::from(std::env::temp_dir());
+    let mut path = std::env::temp_dir();
     if cfg!(target_os = "windows") {
         path.push("piper.cmd");
     } else {
@@ -146,8 +146,7 @@ pub fn write_fallback_script(data: &Parsed) -> PathBuf {
 /// Batch-safe value: double `%`, drop `\r`/`\n`, double inner quotes.
 fn escape_batch(s: &str) -> String {
     s.replace('%', "%%")
-        .replace('\r', "")
-        .replace('\n', "")
+        .replace(['\r', '\n'], "")
         .replace('"', "\"\"")
 }
 

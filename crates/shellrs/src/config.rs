@@ -599,17 +599,13 @@ impl Default for Ai {
 
 /// Saved-command database settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Commands {
     /// Path to the SQLite database. Empty = `<config-dir>/commands.db`.
     #[serde(default)]
     pub db: String,
 }
 
-impl Default for Commands {
-    fn default() -> Self {
-        Self { db: String::new() }
-    }
-}
 
 /// Mouse settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -696,11 +692,10 @@ impl Config {
     /// Directory holding app state: the config's own directory when known,
     /// else `~/.config/shellrs` (created on demand).
     pub fn state_dir(&self) -> PathBuf {
-        if let Some(parent) = self.source.as_ref().and_then(|p| p.parent()) {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = self.source.as_ref().and_then(|p| p.parent())
+            && !parent.as_os_str().is_empty() {
                 return parent.to_path_buf();
             }
-        }
         Self::home_dir().unwrap_or_else(|| PathBuf::from("."))
     }
 
@@ -787,14 +782,13 @@ impl Config {
                 out.push(p);
             }
         }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent() {
                 let p = dir.join("config.toml");
                 if !out.contains(&p) {
                     out.push(p);
                 }
             }
-        }
         out
     }
 
@@ -810,12 +804,11 @@ impl Config {
         if path.is_file() {
             return Some(path.to_path_buf());
         }
-        if let Some(dir) = path.parent() {
-            if std::fs::create_dir_all(dir).is_err() {
+        if let Some(dir) = path.parent()
+            && std::fs::create_dir_all(dir).is_err() {
                 return None;
             }
-        }
-        match std::fs::write(&path, Self::default_toml()) {
+        match std::fs::write(path, Self::default_toml()) {
             Ok(()) => {
                 eprintln!("shellrs: wrote default config to {}", path.display());
                 Some(path.to_path_buf())

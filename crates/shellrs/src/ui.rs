@@ -2,8 +2,8 @@
 //!
 //! Each pane's `vt100::Screen` is rendered via `tui_term::widget::PseudoTerminal`
 //! (ANSI parsing, colors, cursor all handled there). This module owns the
-//! split-tree layout, focused-pane chrome, the top status bar (workspace tabs
-//! + a `throbber-widgets-tui` liveness spinner), and one-shot `tachyonfx`
+//! split-tree layout, focused-pane chrome, the top status bar (workspace tabs,
+//! a `throbber-widgets-tui` liveness spinner), and one-shot `tachyonfx`
 //! transitions for splits (dissolve-in) and focus changes (fade flash).
 
 use ratatui::Frame;
@@ -85,11 +85,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     for (id, rect) in &rects {
         let inner = Block::default().borders(Borders::ALL).inner(*rect);
-        if inner.width >= 2 && inner.height >= 2 {
-            if let Some(p) = app.ws_mut().pane_mut(*id) {
+        if inner.width >= 2 && inner.height >= 2
+            && let Some(p) = app.ws_mut().pane_mut(*id) {
                 p.resize(inner.width, inner.height);
             }
-        }
     }
 
     // Render panes (re-borrow after resize).
@@ -555,8 +554,8 @@ pub(crate) fn image_popup_fitted(area: Rect, dims: (u32, u32), cell_w: f32, cell
         || ih == 0
         || inner.width < 2
         || inner.height < 2
-        || !(cell_w > 0.0)
-        || !(cell_h > 0.0)
+        || cell_w.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+        || cell_h.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
     {
         return outer;
     }

@@ -150,7 +150,7 @@ fn set_ctrlc_ignored(ignored: bool) {
 /// handling while shellrs itself stays immune.
 #[cfg(windows)]
 fn spawn_without_ctrlc_inherit(
-    slave: &Box<dyn portable_pty::SlavePty + Send>,
+    slave: &(dyn portable_pty::SlavePty + Send),
     cmd: portable_pty::CommandBuilder,
     shell: &str,
 ) -> Result<Box<dyn Child + Send + Sync>, String> {
@@ -165,7 +165,7 @@ fn spawn_without_ctrlc_inherit(
 /// Non-Windows spawn: no console control handlers to worry about.
 #[cfg(not(windows))]
 fn spawn_without_ctrlc_inherit(
-    slave: &Box<dyn portable_pty::SlavePty + Send>,
+    slave: &(dyn portable_pty::SlavePty + Send),
     cmd: portable_pty::CommandBuilder,
     shell: &str,
 ) -> Result<Box<dyn Child + Send + Sync>, String> {
@@ -233,7 +233,7 @@ impl Pane {
             cmd.env("PROMPT", "$E]133;A$E\\$P$G");
         }
 
-        let child = spawn_without_ctrlc_inherit(&pair.slave, cmd, shell)?;
+        let child = spawn_without_ctrlc_inherit(&*pair.slave, cmd, shell)?;
         drop(pair.slave);
         log::debug!("pane {id} spawned {shell:?}");
 
@@ -339,15 +339,11 @@ impl Pane {
             self.record_output(&chunk.text, chunk.marks, &chunk.osc7);
             self.parser.process(&chunk.raw);
         }
-        if !self.dead {
-            match self.child.try_wait() {
-                Ok(Some(_)) => {
-                    self.dead = true;
-                    self.parser.process(b"\r\n[shellrs] shell exited\r\n");
-                }
-                _ => {}
+        if !self.dead
+            && let Ok(Some(_)) = self.child.try_wait() {
+                self.dead = true;
+                self.parser.process(b"\r\n[shellrs] shell exited\r\n");
             }
-        }
         n
     }
 
@@ -372,7 +368,7 @@ impl Pane {
             self.last_cmd = self.capture.len();
         }
         self.last_out = now;
-        self.parse_cwd(&text);
+        self.parse_cwd(text);
         for dir in osc7 {
             if dir.is_dir() {
                 self.cwd = dir.clone();
@@ -380,12 +376,11 @@ impl Pane {
             }
         }
         for line in text.lines() {
-            if let Some(dir) = cwd_from_prompt_line(line) {
-                if dir.is_dir() {
+            if let Some(dir) = cwd_from_prompt_line(line)
+                && dir.is_dir() {
                     self.cwd = dir;
                     self.cwd_seq = self.cwd_seq.wrapping_add(1);
                 }
-            }
         }
         let base = self.capture.len();
         for m in marks {
@@ -399,7 +394,7 @@ impl Pane {
                 self.last_prompt = Some(t.to_string());
             }
         }
-        self.capture.push_str(&text);
+        self.capture.push_str(text);
         if self.capture.len() > CAPTURE_CAP {
             // Trim on a char boundary (multibyte text would otherwise panic
             // `String::drain`), keeping marker offsets in sync.
@@ -442,14 +437,12 @@ impl Pane {
             let cmd = self.last_input.trim();
             let mut lines: Vec<String> = burst.lines().map(|l| l.to_string()).collect();
             // Trim a prompt suffix stuck to the final output line.
-            if let Some(p) = self.last_prompt.as_deref() {
-                if let Some(last) = lines.iter_mut().rev().find(|l| !l.trim().is_empty()) {
-                    if last.ends_with(p) && last.trim_end().len() > p.len() {
+            if let Some(p) = self.last_prompt.as_deref()
+                && let Some(last) = lines.iter_mut().rev().find(|l| !l.trim().is_empty())
+                    && last.ends_with(p) && last.trim_end().len() > p.len() {
                         let keep = last.len() - p.len();
                         last.truncate(keep);
                     }
-                }
-            }
             while lines
                 .last()
                 .is_some_and(|l| l.trim().is_empty() || promptish(l))
@@ -1281,6 +1274,14 @@ fn default_shell() -> String {
 mod tests {
     use super::*;
 
+    /// Shell for tests that assert exact prompt/echo text. On Windows
+    /// `cmd.exe /d` skips AutoRun, so a developer's Clink/oh-my-posh injection
+    /// can't rewrite the prompt (and hide the OSC 133 marker); elsewhere the
+    /// default `$SHELL`/`sh` is already deterministic.
+    fn deterministic_shell() -> &'static str {
+        if cfg!(windows) { "cmd.exe /d" } else { "" }
+    }
+
     /// Probe raw PTY reads on a background thread (bounded wait), logging
     /// each result plus spawn diagnostics.
     #[test]
@@ -1336,12 +1337,9 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut got = 0usize;
         while std::time::Instant::now() < deadline {
-            match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(msg) => {
-                    got += 1;
-                    println!("recv: {msg}");
-                }
-                Err(_) => {}
+            if let Ok(msg) = rx.recv_timeout(Duration::from_millis(200)) {
+                got += 1;
+                println!("recv: {msg}");
             }
         }
         println!("wait_status={:?}", child.try_wait());
@@ -1428,7 +1426,7 @@ mod tests {
             .build()
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
-        let mut pane = Pane::spawn(0, "", 200, rt.handle(), &wake).expect("spawn");
+        let mut pane = Pane::spawn(0, deterministic_shell(), 200, rt.handle(), &wake).expect("spawn");
         // Let the first prompt (with its marker) arrive.
         for _ in 0..60 {
             pane.poll();

@@ -63,11 +63,10 @@ pub fn extract_osc7_dirs(input: &str) -> Vec<std::path::PathBuf> {
             }
             match end {
                 Some((stop, next)) => {
-                    if let Ok(payload) = std::str::from_utf8(&bytes[start..stop]) {
-                        if let Some(p) = osc7_uri_to_path(payload.trim()) {
+                    if let Ok(payload) = std::str::from_utf8(&bytes[start..stop])
+                        && let Some(p) = osc7_uri_to_path(payload.trim()) {
                             out.push(p);
                         }
-                    }
                     i = next;
                 }
                 // Unterminated (split across reads): stop, the caller
@@ -87,10 +86,9 @@ pub fn extract_osc7_dirs(input: &str) -> Vec<std::path::PathBuf> {
 fn osc7_uri_to_path(payload: &str) -> Option<std::path::PathBuf> {
     let rest = payload.strip_prefix("file://").unwrap_or(payload);
     // Split `host/path`: the first `/` ends the host part.
-    let path = match rest.find('/') {
-        Some(i) => &rest[i..],
-        // No `/` at all: a bare host with no path is useless.
-        None => return None,
+    let path = {
+        let i = rest.find('/')?;
+        &rest[i..]
     };
     let decoded = percent_decode(path);
     if decoded.is_empty() {
@@ -116,13 +114,12 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
                 out.push(h << 4 | l);
                 i += 3;
                 continue;
             }
-        }
         out.push(bytes[i]);
         i += 1;
     }

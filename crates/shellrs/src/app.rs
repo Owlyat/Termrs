@@ -139,7 +139,11 @@ pub enum Mode {
 }
 
 /// Command palette entries (ctrl+p).
+///
+/// Variants intentionally repeat "Command" (`CommandPalette`, `SaveCommand`):
+/// they read as palette actions, and renaming would churn every call site.
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::enum_variant_names)]
 pub enum Command {
     SplitHorizontal,
     SplitVertical,
@@ -461,11 +465,10 @@ impl SelectMode {
                 .skip(col + 1)
                 .find(|(_, c)| **c == target)
                 .map(|(i, _)| i);
-            if let Some(i) = hit {
-                if i > col + 1 {
+            if let Some(i) = hit
+                && i > col + 1 {
                     self.cur = (row, (i - 1) as u16);
                 }
-            }
         } else {
             let hit = chars
                 .iter()
@@ -474,11 +477,10 @@ impl SelectMode {
                 .rev()
                 .find(|(_, c)| **c == target)
                 .map(|(i, _)| i);
-            if let Some(i) = hit {
-                if i + 1 < col {
+            if let Some(i) = hit
+                && i + 1 < col {
                     self.cur = (row, (i + 1) as u16);
                 }
-            }
         }
     }
 
@@ -888,7 +890,7 @@ impl Palette {
                 .collect()
         };
         // Best score first; stable for equal scores (keeps ALL order).
-        results.sort_by(|a, b| b.0.cmp(&a.0));
+        results.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         self.results = results.into_iter().map(|(_, item)| item).collect();
         self.selected = self.selected.min(self.results.len().saturating_sub(1));
     }
@@ -977,7 +979,7 @@ impl CommandPicker {
                 })
                 .collect()
         };
-        hits.sort_by(|a, b| b.0.cmp(&a.0));
+        hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         self.results = hits.into_iter().map(|(_, h)| h).collect();
         self.selected = self.selected.min(self.results.len().saturating_sub(1));
     }
@@ -1083,7 +1085,7 @@ impl CheatPicker {
                 })
                 .collect()
         };
-        hits.sort_by(|a, b| b.0.cmp(&a.0));
+        hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         self.results = hits.into_iter().map(|(_, h)| h).collect();
         self.selected = self.selected.min(self.results.len().saturating_sub(1));
     }
@@ -1111,11 +1113,10 @@ impl CheatPicker {
 
     /// Tick/untick the highlighted row.
     fn toggle_selected(&mut self) {
-        if let Some(hit) = self.results.get(self.selected) {
-            if let Some(item) = self.items.get_mut(hit.index) {
+        if let Some(hit) = self.results.get(self.selected)
+            && let Some(item) = self.items.get_mut(hit.index) {
                 item.checked = !item.checked;
             }
-        }
     }
 
     /// Tick (`on`) or clear (`!on`) every currently shown row.
@@ -1243,14 +1244,13 @@ impl FontPicker {
         p.refilter();
         // Preselect the active font (when it is a real file) so its preview
         // shows immediately; auto-detect keeps the "system default" row.
-        if !p.active.trim().is_empty() {
-            if let Some(i) = p.results.iter().position(|h| {
+        if !p.active.trim().is_empty()
+            && let Some(i) = p.results.iter().position(|h| {
                 !h.item.path.as_os_str().is_empty()
                     && h.item.path.to_string_lossy() == p.active
             }) {
                 p.selected = i;
             }
-        }
         p
     }
 
@@ -1290,7 +1290,7 @@ impl FontPicker {
                 })
                 .collect()
         };
-        hits.sort_by(|a, b| b.0.cmp(&a.0));
+        hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         self.results = hits.into_iter().map(|(_, h)| h).collect();
         self.selected = self.selected.min(self.results.len().saturating_sub(1));
     }
@@ -2257,11 +2257,10 @@ impl App {
         match self.ws_mut().split(crate::workspace::SplitDir::Vertical, &shell, scrollback, &rt) {
             Ok(new_id) => {
                 let cmd = args.join(" ");
-                if !cmd.is_empty() {
-                    if let Some(p) = self.ws_mut().pane_mut(new_id) {
+                if !cmd.is_empty()
+                    && let Some(p) = self.ws_mut().pane_mut(new_id) {
                         p.write(format!("{cmd}\r").as_bytes());
                     }
-                }
                 crate::ipc::Response {
                     ok: true,
                     pane_id: Some(new_id),
@@ -2770,11 +2769,10 @@ impl App {
                 // Ctrl+e opens the two-column edit table for the highlighted
                 // import row (Enter rewrites it, Esc returns here).
                 Key::Char('e') if ctrl => {
-                    if let Some(hit) = p.results.get(p.selected) {
-                        if let Some(item) = p.items.get(hit.index) {
+                    if let Some(hit) = p.results.get(p.selected)
+                        && let Some(item) = p.items.get(hit.index) {
                             edit = Some((hit.index, item.entry.clone()));
                         }
-                    }
                 }
                 Key::Backspace => p.backspace(),
                 Key::Char(_) => {
@@ -3496,8 +3494,7 @@ impl App {
             }
             menu.drain_events().collect::<Vec<_>>()
         };
-        for e in events {
-            let MenuEvent::Selected(action) = e;
+        if let Some(MenuEvent::Selected(action)) = events.into_iter().next() {
             self.menu.reset();
             self.menu_open = false;
             self.apply_menu_action(action);
@@ -3700,11 +3697,10 @@ impl App {
             return;
         }
         if let Some(id) = delete {
-            if let Some(db) = &self.db {
-                if let Err(e) = db.delete(id) {
+            if let Some(db) = &self.db
+                && let Err(e) = db.delete(id) {
                     self.status = format!("delete failed: {e}");
                 }
-            }
             if let Some(p) = self.command_picker.as_mut() {
                 p.remove_id(id);
             }
@@ -3730,11 +3726,10 @@ impl App {
 
     /// Type a saved command into the focused pane and run it.
     fn run_saved(&mut self, id: i64, text: String) {
-        if let Some(db) = &self.db {
-            if let Err(e) = db.mark_used(id) {
+        if let Some(db) = &self.db
+            && let Err(e) = db.mark_used(id) {
                 log::warn!("command db mark_used: {e}");
             }
-        }
         log::info!("command run: {text}");
         self.run_in_pane(&text);
         self.status = format!("run: {text}");
@@ -3765,15 +3760,14 @@ impl App {
             // The picker that opened the form is still live underneath
             // (mode() puts CommandForm first), so it simply reappears.
             match origin {
-                Some(FormOrigin::CommandPicker) | Some(FormOrigin::CheatPicker) => {
+                Some(FormOrigin::CommandPicker) | Some(FormOrigin::CheatPicker)
                     // Refresh the command picker from the DB in case a prior
                     // edit changed it.
                     if origin == Some(FormOrigin::CommandPicker)
                         && self.command_picker.is_none()
-                    {
+                    => {
                         self.open_commands();
                     }
-                }
                 _ => {}
             }
             return;
@@ -3812,12 +3806,11 @@ impl App {
         if let Some(index) = form.edit_cheat {
             // Rewrite the pending cheat.sh row in place; nothing is saved
             // to the database until the import is confirmed.
-            if let Some(p) = self.cheat_picker.as_mut() {
-                if let Some(item) = p.items.get_mut(index) {
+            if let Some(p) = self.cheat_picker.as_mut()
+                && let Some(item) = p.items.get_mut(index) {
                     item.entry.command = command.clone();
                     item.entry.comment = comment;
                 }
-            }
             self.status = format!("edited import row: {command}");
             return;
         }
@@ -4177,8 +4170,7 @@ impl App {
         }
         self.menu.select();
         let events: Vec<MenuEvent<WsAction>> = self.menu.drain_events().collect();
-        for e in events {
-            let MenuEvent::Selected(action) = e;
+        if let Some(MenuEvent::Selected(action)) = events.into_iter().next() {
             self.menu.reset();
             self.menu_open = false;
             self.apply_menu_action(action);
@@ -4252,8 +4244,8 @@ impl App {
         if !self.config.mouse.enabled || self.mode() != Mode::Normal {
             return MouseClickOutcome::Ignored;
         }
-        if pressed && mods.contains(self.url_mods()) {
-            if let Some(url) = self.url_at(col, row) {
+        if pressed && mods.contains(self.url_mods())
+            && let Some(url) = self.url_at(col, row) {
                 if crate::mouse::is_openable_url(&url) {
                     log::info!("open url: {url}");
                     match open::that(&url) {
@@ -4264,7 +4256,6 @@ impl App {
                 }
                 return MouseClickOutcome::Ignored;
             }
-        }
         let Some((id, c, r)) = self.inner_at(col, row) else {
             return MouseClickOutcome::Ignored;
         };
@@ -4337,8 +4328,8 @@ impl App {
     /// else the focused pane's scrollback exactly as before. Returns whether
     /// the wheel was forwarded (false = scrolled back instead).
     pub fn mouse_wheel(&mut self, col: u16, row: u16, lines: i32, mods: Mods) -> bool {
-        if lines != 0 && self.config.mouse.enabled && self.mode() == Mode::Normal {
-            if let Some((id, c, r)) = self.inner_at(col, row) {
+        if lines != 0 && self.config.mouse.enabled && self.mode() == Mode::Normal
+            && let Some((id, c, r)) = self.inner_at(col, row) {
                 let state = match self.ws().pane(id) {
                     Some(pane) => pane.mouse_state(),
                     None => return false,
@@ -4356,7 +4347,6 @@ impl App {
                     return true;
                 }
             }
-        }
         self.scroll_focused(lines);
         false
     }
@@ -4463,7 +4453,7 @@ impl App {
     /// Polled every ~0.5s (a `stat` per frame would be wasteful).
     pub fn hot_reload_check(&mut self) {
         self.reload_tick = self.reload_tick.wrapping_add(1);
-        if self.reload_tick % 30 != 0 {
+        if !self.reload_tick.is_multiple_of(30) {
             return;
         }
         let Some(path) = self.config.source.clone() else {
@@ -4869,6 +4859,35 @@ impl App {
         }
         let cur = self.current;
         self.drop_workspace(cur);
+    }
+}
+
+/// Translate our backend-agnostic [`KeyPress`] into a `ratatui-textarea`
+/// [`Input`], so prompts keep their Emacs-style editing without crossterm.
+fn textarea_input(ev: &KeyPress) -> Input {
+    Input {
+        key: match ev.key {
+            Key::Char(c) => TaKey::Char(c),
+            Key::Space => TaKey::Char(' '),
+            Key::Enter => TaKey::Enter,
+            Key::Esc => TaKey::Esc,
+            Key::Tab | Key::BackTab => TaKey::Tab,
+            Key::Backspace => TaKey::Backspace,
+            Key::Delete => TaKey::Delete,
+            Key::Up => TaKey::Up,
+            Key::Down => TaKey::Down,
+            Key::Left => TaKey::Left,
+            Key::Right => TaKey::Right,
+            Key::Home => TaKey::Home,
+            Key::End => TaKey::End,
+            Key::PageUp => TaKey::PageUp,
+            Key::PageDown => TaKey::PageDown,
+            Key::F(n) => TaKey::F(n),
+            Key::Insert => TaKey::Null,
+        },
+        ctrl: ev.mods.contains(Mods::CONTROL),
+        alt: ev.mods.contains(Mods::ALT),
+        shift: ev.mods.contains(Mods::SHIFT),
     }
 }
 
@@ -5655,14 +5674,12 @@ mod tests {
         let mut landed = false;
         for _ in 0..400 {
             app.poll_font_preview();
-            if !app.font_preview_loading() {
-                if let Some(((path, size), _, _)) = app.font_preview_meta() {
-                    if path == real.path.to_string_lossy() && size == want_size {
+            if !app.font_preview_loading()
+                && let Some(((path, size), _, _)) = app.font_preview_meta()
+                    && path == real.path.to_string_lossy() && size == want_size {
                         landed = true;
                         break;
                     }
-                }
-            }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert!(landed, "latest preview never landed");
@@ -5782,12 +5799,11 @@ mod tests {
         for _ in 0..80 {
             app.poll_panes();
             let fid = app.ws().focused;
-            if let Some(p) = app.ws().pane(fid) {
-                if p.screen().contents().contains("macro_probe_xyz") {
+            if let Some(p) = app.ws().pane(fid)
+                && p.screen().contents().contains("macro_probe_xyz") {
                     seen = true;
                     break;
                 }
-            }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert!(seen, "macro text reached the pane");
@@ -7067,34 +7083,5 @@ mod tests {
             "shellrs-test-{tag}-{}-{nanos}.toml",
             std::process::id()
         ))
-    }
-}
-
-/// Translate our backend-agnostic [`KeyPress`] into a `ratatui-textarea`
-/// [`Input`], so prompts keep their Emacs-style editing without crossterm.
-fn textarea_input(ev: &KeyPress) -> Input {
-    Input {
-        key: match ev.key {
-            Key::Char(c) => TaKey::Char(c),
-            Key::Space => TaKey::Char(' '),
-            Key::Enter => TaKey::Enter,
-            Key::Esc => TaKey::Esc,
-            Key::Tab | Key::BackTab => TaKey::Tab,
-            Key::Backspace => TaKey::Backspace,
-            Key::Delete => TaKey::Delete,
-            Key::Up => TaKey::Up,
-            Key::Down => TaKey::Down,
-            Key::Left => TaKey::Left,
-            Key::Right => TaKey::Right,
-            Key::Home => TaKey::Home,
-            Key::End => TaKey::End,
-            Key::PageUp => TaKey::PageUp,
-            Key::PageDown => TaKey::PageDown,
-            Key::F(n) => TaKey::F(n),
-            Key::Insert => TaKey::Null,
-        },
-        ctrl: ev.mods.contains(Mods::CONTROL),
-        alt: ev.mods.contains(Mods::ALT),
-        shift: ev.mods.contains(Mods::SHIFT),
     }
 }

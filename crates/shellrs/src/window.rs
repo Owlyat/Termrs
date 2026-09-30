@@ -85,7 +85,9 @@ pub struct ShellrsWindow {
     current_preview: Option<(String, u32)>,
     /// Backdrop key (path + opacity) currently uploaded.
     current_backdrop: Option<String>,
-    /// HTTP server handle for remote control.
+    /// HTTP server handle for remote control. Held (never read) so the server
+    /// thread and its channels stay alive for the window's lifetime.
+    #[allow(dead_code)]
     http_server: Option<crate::server::HttpServerHandle>,
     /// Address for the HTTP server (from --server flag).
     server_addr: Option<String>,
@@ -272,7 +274,7 @@ impl ShellrsWindow {
             self.font_set = Some(set);
             return;
         };
-        let prev = std::mem::replace(&mut self.font_set, Some(set));
+        let prev = self.font_set.replace(set);
         self.terminal = None;
         match self.build_backend(&window, size) {
             Ok(terminal) => {
@@ -400,12 +402,11 @@ impl ShellrsWindow {
             }
         });
         let server_mode = self.server_addr.is_some();
-        if server_mode {
-            if let Ok(cwd) = std::env::current_dir() {
+        if server_mode
+            && let Ok(cwd) = std::env::current_dir() {
                 log::info!("server mode: using working directory {}", cwd.display());
                 let _ = std::env::set_current_dir(&cwd);
             }
-        }
         let mut app = App::new(
             self.config.clone(),
             self.layout_path.clone(),
@@ -750,8 +751,8 @@ impl ApplicationHandler<AppEvent> for ShellrsWindow {
         }
         if self.selftest {
             // Optional: validate the GPU image pass against a real file.
-            if let Ok(path) = std::env::var("SHELLRS_SELFTEST_IMAGE") {
-                if let Some(app) = self.app.as_mut() {
+            if let Ok(path) = std::env::var("SHELLRS_SELFTEST_IMAGE")
+                && let Some(app) = self.app.as_mut() {
                     match crate::image_view::ImageView::open(&path) {
                         Ok(img) => {
                             println!(
@@ -763,7 +764,6 @@ impl ApplicationHandler<AppEvent> for ShellrsWindow {
                         Err(e) => eprintln!("shellrs: selftest image failed: {e}"),
                     }
                 }
-            }
             // Optional: exercise a live backend rebuild (zoom, then font) to
             // diagnose rebuild hangs/crashes without clicking through the UI.
             if std::env::var("SHELLRS_SELFTEST_REBUILD").is_ok() {
@@ -832,11 +832,10 @@ impl ApplicationHandler<AppEvent> for ShellrsWindow {
                 self.cursor = position;
                 // Forward motion while a tracked app wants it; cheap no-op
                 // otherwise (no redraw: motion alone changes nothing visual).
-                if let Some((col, row)) = self.cursor_cell() {
-                    if let Some(app) = self.app.as_mut() {
+                if let Some((col, row)) = self.cursor_cell()
+                    && let Some(app) = self.app.as_mut() {
                         app.mouse_move(col, row, self.mods, self.left_held);
                     }
-                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
@@ -1006,11 +1005,10 @@ impl ApplicationHandler<AppEvent> for ShellrsWindow {
                 .as_ref()
                 .map(|app| app.config.clone())
                 .expect("app present");
-            if fresh.window.decorations != self.config.window.decorations {
-                if let Some(w) = &self.window {
+            if fresh.window.decorations != self.config.window.decorations
+                && let Some(w) = &self.window {
                     w.set_decorations(fresh.window.decorations);
                 }
-            }
             if fresh.window.transparent != self.config.window.transparent {
                 log::warn!("transparent changed; restart shellrs to apply");
                 if let Some(app) = self.app.as_mut() {

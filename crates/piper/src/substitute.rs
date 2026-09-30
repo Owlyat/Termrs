@@ -309,8 +309,8 @@ fn eat_unix(s: &str, i: usize, data: &Parsed, all: &str) -> Option<(String, usiz
         return None;
     }
     match b[1] {
-        b'$' => return Some(("$".to_string(), i + 2)),
-        b'*' | b'@' | b'!' => return Some((all.to_string(), i + 2)),
+        b'$' => Some(("$".to_string(), i + 2)),
+        b'*' | b'@' | b'!' => Some((all.to_string(), i + 2)),
         b'0'..=b'9' => {
             let mut j = 1;
             while j < b.len() && b[j].is_ascii_digit() {
@@ -322,7 +322,7 @@ fn eat_unix(s: &str, i: usize, data: &Parsed, all: &str) -> Option<(String, usiz
             } else {
                 String::new()
             };
-            return Some((v, i + j));
+            Some((v, i + j))
         }
         b'{' => {
             let close = rest[2..].find('}')?;
@@ -343,7 +343,7 @@ fn eat_unix(s: &str, i: usize, data: &Parsed, all: &str) -> Option<(String, usiz
                 let v = data.lines.get(n - 1).cloned().unwrap_or_default();
                 return Some((v, i + 2 + close + 1));
             }
-            return None; // unknown ${NAME}: pass through
+            None// unknown ${NAME}: pass through
         }
         c if (c as char).is_ascii_alphabetic() || c == b'_' => {
             let mut j = 1;
@@ -355,9 +355,9 @@ fn eat_unix(s: &str, i: usize, data: &Parsed, all: &str) -> Option<(String, usiz
                 let v = data.lines.get(n - 1).cloned().unwrap_or_default();
                 return Some((v, i + j));
             }
-            return None; // e.g. $HOME, $PATH: pass through for shell
+            None// e.g. $HOME, $PATH: pass through for shell
         }
-        _ => return None,
+        _ => None,
     }
 }
 

@@ -77,14 +77,13 @@ fn run_into<O: Write, E: Write>(command: &str, out: &mut O, err: &mut E) -> Resu
     let results: Vec<Result<Captured, String>> = jobs
         .par_iter()
         .map(|job| {
-            if let Some(filter) = &job.filter {
-                if !eval_filter(&filter.command, filter.negate)? {
+            if let Some(filter) = &job.filter
+                && !eval_filter(&filter.command, filter.negate)? {
                     return Ok(Captured {
                         stdout: Vec::new(),
                         stderr: Vec::new(),
                     });
                 }
-            }
             capture_command(&job.block)
         })
         .collect();

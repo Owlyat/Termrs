@@ -16,13 +16,12 @@ pub fn apply(block: &str, var: &str, value: &str) -> String {
     let mut i = 0;
 
     while i < chars.len() {
-        if chars[i] == '$' || chars[i] == '%' {
-            if let Some(next) = match_reference(&chars, i, &name) {
+        if (chars[i] == '$' || chars[i] == '%')
+            && let Some(next) = match_reference(&chars, i, &name) {
                 out.push_str(value);
                 i = next;
                 continue;
             }
-        }
         out.push(chars[i]);
         i += 1;
     }

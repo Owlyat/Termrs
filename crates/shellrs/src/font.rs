@@ -314,6 +314,7 @@ fn line_box(font: &fontdue::Font, px: f32) -> (f32, f32) {
 
 /// Draw one line with its top at `y_top`; returns the next line top.
 /// Glyph bitmaps blend `fg` over the background by coverage alpha.
+#[allow(clippy::too_many_arguments)] // low-level blitter: a params struct adds no clarity
 fn blit_line(
     font: &fontdue::Font,
     text: &str,

@@ -141,6 +141,7 @@ impl Node {
     /// order (same order as [`Node::leaves`]): each pane starts in its saved
     /// directory, falling back to the process directory when the entry is
     /// missing or gone (`spawn_in` handles that).
+    #[allow(clippy::too_many_arguments)] // recursive builder threading spawn context
     fn from_layout(
         layout: &TreeLayout,
         panes: &mut Vec<Pane>,
@@ -608,13 +609,13 @@ fn resize_in(node: &mut Node, target: usize, dir: Direction, delta: f32) -> bool
     if !in_first && !contains(second, target) {
         return false;
     }
-    let grow_first = match (dir, in_first) {
+    let grow_first = matches!(
+        (dir, in_first),
         (Direction::Right, true)
-        | (Direction::Left, false)
-        | (Direction::Down, true)
-        | (Direction::Up, false) => true,
-        _ => false,
-    };
+            | (Direction::Left, false)
+            | (Direction::Down, true)
+            | (Direction::Up, false)
+    );
     *ratio = (*ratio + if grow_first { delta } else { -delta }).clamp(0.1, 0.9);
     true
 }

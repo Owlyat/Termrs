@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 /// Default limit on how long the AI CLI may run per turn before it is
 /// killed. Overridable per run (and via `[ai] timeout_s`).
+#[cfg(test)]
 pub const DEFAULT_AI_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Hard limit for a single AI-driven probe (`exec`) command.
@@ -63,26 +64,11 @@ fn already_asked(seen: &mut Vec<String>, sig: String) -> bool {
 /// and the final answer is merely typed into the pane for confirmation.
 pub const PROBE_PROTOCOL: &str = "Goal: create a single shell command for the target shell (see the Target shell line) satisfying the user's need. You may first gather context with exactly ONE JSON object per turn: {\"action\":\"db\",\"query\":\"<keywords>\",\"limit\":10} searches the saved command database, or {\"action\":\"which\",\"tools\":[\"<name>\"]} to check whether a CLI tool is installed, or {\"action\":\"help\",\"tool\":\"<name>\"} to read a tool's usage (shellrs runs `<name> /?` on Windows or `<name> --help` elsewhere; the tool itself is NEVER executed, so interactive programs are safe). Each reply returns the query result; then continue or finish with {\"action\":\"answer\",\"command\":\"<single shell command>\"}. Alternatively give the final command as ```answer <command> ```. Rules: you cannot run commands, and shellrs will not run anything for you except help queries -- the ONLY command that ever runs is your final answer, typed into the pane for the user to confirm. Final answer must be one runnable shell line for the target shell satisfying the initial need; prefer a saved command verbatim when one fits.";
 
- /// Ask the configured CLI. `lead_in` is the system text, `question` the user's.
-///
-/// The configured line is used **verbatim** (so quotes and shell syntax keep
-/// their meaning); only the placeholders are substituted and an unquoted
-/// program path containing spaces is wrapped in quotes. A `{prompt}` /
-/// `{question}` placeholder is substituted in place; otherwise the prompt is
-/// written to stdin.
-///
-/// The call is agentic: when the model answers with a `db`/`which`/`help`
-/// JSON query, the query runs locally and its result is fed back for up to
-/// [`MAX_TURNS`] turns, until the model answers with `answer` JSON, an
-/// `answer` fence, or a plain command (legacy single-shot behaviour).
-pub fn run(ai_command: &str, lead_in: &str, question: &str) -> Result<String, String> {
-    run_with_db(ai_command, lead_in, question, &[])
-}
-
-/// Same as [`run`], but the model may query `saved` (a snapshot of the
-/// saved-command database) with `{"action":"db",...}` instead of receiving
-/// every command in the first prompt. The snapshot is only searched — rows
-/// are fed back solely for queries the model actually makes.
+ /// Ask the configured CLI, letting the model query the saved `saved`
+/// snapshot with `{"action":"db",...}` instead of receiving every command in
+/// the first prompt. The snapshot is only searched — rows are fed back solely
+/// for queries the model actually makes.
+#[cfg(test)]
 pub fn run_with_db(
     ai_command: &str,
     lead_in: &str,
@@ -90,6 +76,12 @@ pub fn run_with_db(
     saved: &[crate::commands_db::SavedCommand],
 ) -> Result<String, String> {
     run_full(ai_command, lead_in, question, saved, DEFAULT_AI_TIMEOUT)
+}
+
+/// Convenience wrapper for tests: run with no saved-command snapshot.
+#[cfg(test)]
+pub fn run(ai_command: &str, lead_in: &str, question: &str) -> Result<String, String> {
+    run_with_db(ai_command, lead_in, question, &[])
 }
 
 /// Full agentic loop with an explicit per-turn `timeout` for the AI CLI.
@@ -269,12 +261,11 @@ fn run_raw_inner(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("run {line:?}: {e}"))?;
-    if !has_placeholder {
-        if let Some(mut stdin) = child.stdin.take() {
+    if !has_placeholder
+        && let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
             // Drop closes stdin so CLIs that read to EOF proceed.
         }
-    }
     let (stdout, stderr, status, timed_out) = collect_with(child, timeout)?;
     if timed_out {
         return Err(format!(
@@ -361,13 +352,16 @@ fn fold_to_ascii(s: &str) -> String {
     deunicode::deunicode(s)
 }
 
+/// `(stdout, stderr, exit status, timed_out)` from a finished CLI child.
+type CollectResult = (Vec<u8>, Vec<u8>, Option<std::process::ExitStatus>, bool);
+
 /// Read the child's stdout/stderr on background threads while polling for
 /// exit, killing it if it exceeds `limit`. Prevents a hung CLI from
 /// wedging the AI worker.
 fn collect_with(
     mut child: std::process::Child,
     limit: Duration,
-) -> Result<(Vec<u8>, Vec<u8>, Option<std::process::ExitStatus>, bool), String> {
+) -> Result<CollectResult, String> {
     let out_handle = child.stdout.take().map(spawn_reader);
     let err_handle = child.stderr.take().map(spawn_reader);
 
@@ -458,9 +452,8 @@ pub fn shell_family(shell: &str) -> ShellFamily {
     let l = shell.to_ascii_lowercase();
     if l.contains("powershell") || l.contains("pwsh") {
         ShellFamily::Powershell
-    } else if l.contains("cmd") || l.contains("command prompt") {
-        ShellFamily::Cmd
-    } else if l.trim().is_empty() && cfg!(windows) {
+    } else if l.contains("cmd") || l.contains("command prompt") || (l.trim().is_empty() && cfg!(windows))
+    {
         ShellFamily::Cmd
     } else {
         ShellFamily::Posix
@@ -867,12 +860,12 @@ fn answer_fence(s: &str) -> Option<String> {
     let mut buf = String::new();
     for line in s.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
+        if let Some(rest) = trimmed.strip_prefix("```") {
             if inside {
                 let cmd = clean(&buf);
                 return if cmd.is_empty() { None } else { Some(cmd) };
             }
-            if trimmed[3..].trim().to_ascii_lowercase().starts_with("answer") {
+            if rest.trim().to_ascii_lowercase().starts_with("answer") {
                 inside = true;
             }
             continue;
@@ -1216,11 +1209,10 @@ pub fn extract_command(answer: &str) -> String {
         return cmd;
     }
     // `{"action":"answer","command":"..."}` is also a final answer.
-    if let Probe::Answer(cmd) = parse_probe(answer) {
-        if !cmd.is_empty() {
+    if let Probe::Answer(cmd) = parse_probe(answer)
+        && !cmd.is_empty() {
             return cmd;
         }
-    }
     let raw = match first_fence(answer) {
         Some(block) => block,
         None => answer

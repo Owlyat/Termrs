@@ -30,11 +30,10 @@ impl CommandDb {
     /// Open (creating the file/schema when missing). The parent directory is
     /// created on demand.
     pub fn open(path: &Path) -> Result<Self, String> {
-        if let Some(dir) = path.parent() {
-            if !dir.as_os_str().is_empty() {
+        if let Some(dir) = path.parent()
+            && !dir.as_os_str().is_empty() {
                 std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
             }
-        }
         let conn =
             Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
         let _ = conn.pragma_update(None, "journal_mode", "WAL");

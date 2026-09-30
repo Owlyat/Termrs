@@ -124,11 +124,10 @@ fn find_comparisons(s: &str) -> Vec<(usize, usize)> {
             }
             _ if depth == 0 => {
                 let rest = &b[i..];
-                if rest.len() >= 2
-                    && (rest[0..2] == [b'=', b'='][..]
-                        || rest[0..2] == [b'!', b'='][..]
-                        || rest[0..2] == [b'<', b'='][..]
-                        || rest[0..2] == [b'>', b'='][..])
+                if rest.starts_with(b"==")
+                    || rest.starts_with(b"!=")
+                    || rest.starts_with(b"<=")
+                    || rest.starts_with(b">=")
                 {
                     ops.push((i, 2));
                     i += 2;
@@ -178,8 +177,8 @@ fn eval_inner(expr: &str) -> Result<EvalVal, String> {
     }
     // Prefix `!` (logical NOT). Postfix `!` (factorial like `5!`)
     // does not start with `!`, so it still reaches meval untouched.
-    if expr.starts_with('!') {
-        let inner = eval_inner(&expr[1..])?;
+    if let Some(rest) = expr.strip_prefix('!') {
+        let inner = eval_inner(rest)?;
         return Ok(EvalVal::Bool(!inner.is_true()));
     }
 

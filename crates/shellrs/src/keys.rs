@@ -177,7 +177,7 @@ pub fn matches(press: &KeyPress, spec: &str) -> bool {
     // binding means the same physical key either way.
     if press.mods.contains(Mods::CONTROL) || b.mods.contains(Mods::CONTROL) {
         if let (Key::Char(a), Key::Char(c)) = (press.key, b.key) {
-            if a.to_ascii_lowercase() != c.to_ascii_lowercase() {
+            if !a.eq_ignore_ascii_case(&c) {
                 return false;
             }
         } else if press.key != b.key {
@@ -414,9 +414,7 @@ fn unicode_char(press: &KeyPress) -> u16 {
     }
     if let Some(ch) = press.text.as_deref().and_then(|t| t.chars().next()) {
         let mut buf = [0u16; 2];
-        for u in ch.encode_utf16(&mut buf) {
-            return *u;
-        }
+        return ch.encode_utf16(&mut buf)[0];
     }
     match press.key {
         Key::Space => 0x20,
@@ -506,13 +504,11 @@ pub fn from_winit(ev: &WinitKeyEvent, mods: Mods) -> Option<KeyPress> {
             NamedKey::F24 => Key::F(24),
             _ => return None,
         },
-        WinitKey::Character(s) => match s.chars().next() {
-            Some(c) => {
-                let (k, m) = classify_char(c, mods)?;
-                mods = m;
-                k
-            }
-            None => return None,
+        WinitKey::Character(s) => {
+            let c = s.chars().next()?;
+            let (k, m) = classify_char(c, mods)?;
+            mods = m;
+            k
         },
         _ => return None,
     };
