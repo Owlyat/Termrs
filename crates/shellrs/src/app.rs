@@ -2344,6 +2344,12 @@ impl App {
                 button,
                 modifier,
             } => self.mcp_mouse_click(pane_id, col, row, button, modifier.as_deref()),
+            K::Drag {
+                from,
+                to,
+                button,
+                modifier,
+            } => self.mcp_mouse_drag(pane_id, from, to, button, modifier.as_deref()),
             K::Interrupt => match self.find_pane_mut(pane_id) {
                 Some(p) => {
                     p.interrupt();
@@ -2387,6 +2393,31 @@ impl App {
         mods
     }
 
+    /// Make `pane_id`'s workspace active and return its cached draw rect plus
+    /// the inner (border-inset) grid size. Mouse helpers translate pane-relative
+    /// cells through this rect; `mouse_button`/`mouse_move` read `self.ws()`.
+    fn mcp_pane_grid(&mut self, pane_id: usize) -> Result<(Rect, u16, u16), String> {
+        let Some(ws_idx) = self.workspaces.iter().position(|w| w.pane(pane_id).is_some()) else {
+            return Err(format!("pane {pane_id} is gone"));
+        };
+        if ws_idx != self.current {
+            self.switch_to(ws_idx);
+        }
+        let Some(rect) = self.ws().pane_rect(pane_id) else {
+            return Err(format!("pane {pane_id} is not laid out yet"));
+        };
+        // Panes draw a one-cell border, so the inner grid starts at +1.
+        Ok((rect, rect.width.saturating_sub(2), rect.height.saturating_sub(2)))
+    }
+
+    /// True when a mouse report at either press or release reached the pane.
+    fn mouse_forwarded(o: MouseClickOutcome) -> bool {
+        matches!(
+            o,
+            MouseClickOutcome::Forwarded | MouseClickOutcome::OpenedUrl
+        )
+    }
+
     /// Emulate a mouse click at zero-based cell `(col, row)` inside the pane's
     /// text grid. [`App::mouse_button`] wants full-window coordinates, so
     /// translate through the pane's cached draw rect (the border insets the
@@ -2401,19 +2432,10 @@ impl App {
         modifier: Option<&str>,
     ) -> crate::mcp::McpReply {
         use crate::mcp::McpReply as R;
-        let Some(ws_idx) = self.workspaces.iter().position(|w| w.pane(pane_id).is_some()) else {
-            return R::Err(format!("pane {pane_id} is gone"));
+        let (rect, inner_w, inner_h) = match self.mcp_pane_grid(pane_id) {
+            Ok(v) => v,
+            Err(e) => return R::Err(e),
         };
-        // `mouse_button` reads the current workspace, so make sure the pane's
-        // workspace is the active one before hit-testing.
-        if ws_idx != self.current {
-            self.switch_to(ws_idx);
-        }
-        let Some(rect) = self.ws().pane_rect(pane_id) else {
-            return R::Err(format!("pane {pane_id} is not laid out yet"));
-        };
-        // Panes draw a one-cell border, so the inner grid starts at +1.
-        let (inner_w, inner_h) = (rect.width.saturating_sub(2), rect.height.saturating_sub(2));
         if col >= inner_w || row >= inner_h {
             return R::Err(format!(
                 "({col}, {row}) is outside the pane grid ({inner_w}x{inner_h})"
@@ -2426,18 +2448,95 @@ impl App {
         if button == crate::mouse::MouseButton::Left {
             self.focus_pane_at(full_col, full_row);
         }
-        let forwarded = |o: MouseClickOutcome| {
-            matches!(
-                o,
-                MouseClickOutcome::Forwarded | MouseClickOutcome::OpenedUrl
-            )
-        };
-        if forwarded(pressed) || forwarded(released) {
+        if Self::mouse_forwarded(pressed) || Self::mouse_forwarded(released) {
             R::Text(format!("clicked {button:?} at ({col}, {row})"))
         } else {
             R::Err(format!(
                 "pane {pane_id} did not accept the click (its app must enable mouse tracking)"
             ))
+        }
+    }
+
+    /// Emulate a drag: press `button` at `from`, drag through intermediate
+    /// cells to `to`, then release. Motion reports need the pane's app to have
+    /// enabled drag/any-motion tracking (DECSET 1002/1003).
+    fn mcp_mouse_drag(
+        &mut self,
+        pane_id: usize,
+        from: (u16, u16),
+        to: (u16, u16),
+        button: crate::mouse::MouseButton,
+        modifier: Option<&str>,
+    ) -> crate::mcp::McpReply {
+        use crate::mcp::McpReply as R;
+        let (rect, inner_w, inner_h) = match self.mcp_pane_grid(pane_id) {
+            Ok(v) => v,
+            Err(e) => return R::Err(e),
+        };
+        if from.0 >= inner_w || from.1 >= inner_h || to.0 >= inner_w || to.1 >= inner_h {
+            return R::Err(format!(
+                "drag {from:?}..{to:?} is outside the pane grid ({inner_w}x{inner_h})"
+            ));
+        }
+        let mods = Self::mcp_mods(modifier);
+        let (full_col, full_row) = (rect.x + 1 + from.0, rect.y + 1 + from.1);
+        let (end_col, end_row) = (rect.x + 1 + to.0, rect.y + 1 + to.1);
+        let pressed = self.mouse_button(full_col, full_row, button, true, mods);
+        // Walk the straight line between the two cells, one report per step,
+        // so apps that follow the pointer see the whole gesture (a same-cell
+        // drag is just press + release).
+        let (x0, y0) = (from.0 as i32, from.1 as i32);
+        let (x1, y1) = (to.0 as i32, to.1 as i32);
+        let steps = (x1 - x0).abs().max((y1 - y0).abs());
+        let mut moved = false;
+        for i in 1..=steps {
+            let x = (x0 + (x1 - x0) * i / steps) as u16;
+            let y = (y0 + (y1 - y0) * i / steps) as u16;
+            moved |= self.mcp_write_motion(pane_id, x, y, button, mods);
+        }
+        let released = self.mouse_button(end_col, end_row, button, false, mods);
+        if button == crate::mouse::MouseButton::Left {
+            self.focus_pane_at(full_col, full_row);
+        }
+        if Self::mouse_forwarded(pressed) || moved || Self::mouse_forwarded(released) {
+            R::Text(format!("dragged {button:?} from {from:?} to {to:?}"))
+        } else {
+            R::Err(format!(
+                "pane {pane_id} did not accept the drag (its app must enable mouse tracking)"
+            ))
+        }
+    }
+
+    /// Forward a held-button motion report at pane-relative `(col, row)`.
+    /// Returns whether the pane's app asked for motion and the bytes went out.
+    fn mcp_write_motion(
+        &mut self,
+        pane_id: usize,
+        col: u16,
+        row: u16,
+        button: crate::mouse::MouseButton,
+        mods: Mods,
+    ) -> bool {
+        let Some(rect) = self.ws().pane_rect(pane_id) else {
+            return false;
+        };
+        let (full_col, full_row) = (rect.x + 1 + col, rect.y + 1 + row);
+        let Some((id, c, r)) = self.inner_at(full_col, full_row) else {
+            return false;
+        };
+        let state = match self.ws().pane(id) {
+            Some(pane) => pane.mouse_state(),
+            None => return false,
+        };
+        if !state.wants_motion(true) {
+            return false;
+        }
+        let bytes = crate::mouse::encode_motion(Some(button), c, r, mods, state.encoding);
+        if let Some(pane) = self.ws_mut().pane_mut(id) {
+            pane.write(&bytes);
+            true
+        } else {
+            false
         }
     }
 
@@ -6884,7 +6983,7 @@ mod tests {
         app.ws_mut()
             .pane_mut(fid)
             .expect("pane")
-            .feed_for_test(b"\x1b[?1000h\x1b[?1006h");
+            .feed_for_test(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h");
         match app.mcp_mouse_click(fid, 200, 2, crate::mouse::MouseButton::Left, None) {
             McpReply::Err(e) => assert!(e.contains("outside the pane grid"), "err: {e}"),
             _ => panic!("expected out-of-grid rejection"),
@@ -6894,6 +6993,30 @@ mod tests {
         match app.mcp_mouse_click(fid, 3, 2, crate::mouse::MouseButton::Left, None) {
             McpReply::Text(t) => assert!(t.contains("(3, 2)"), "text: {t}"),
             _ => panic!("expected a click report"),
+        }
+
+        // Drag with a non-left button: press, motion along the line, release.
+        match app.mcp_mouse_drag(
+            fid,
+            (1, 1),
+            (5, 4),
+            crate::mouse::MouseButton::Right,
+            None,
+        ) {
+            McpReply::Text(t) => assert!(t.contains("dragged Right"), "drag: {t}"),
+            _ => panic!("expected a drag report"),
+        }
+
+        // An out-of-grid drag end is rejected before any bytes go out.
+        match app.mcp_mouse_drag(
+            fid,
+            (1, 1),
+            (200, 4),
+            crate::mouse::MouseButton::Left,
+            None,
+        ) {
+            McpReply::Err(e) => assert!(e.contains("outside the pane grid"), "err: {e}"),
+            _ => panic!("expected out-of-grid drag rejection"),
         }
 
         for w in &mut app.workspaces {

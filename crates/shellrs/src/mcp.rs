@@ -50,6 +50,12 @@ pub enum McpQueryKind {
         button: crate::mouse::MouseButton,
         modifier: Option<String>,
     },
+    Drag {
+        from: (u16, u16),
+        to: (u16, u16),
+        button: crate::mouse::MouseButton,
+        modifier: Option<String>,
+    },
     Interrupt,
     Screen,
     Screenshot,
@@ -181,8 +187,8 @@ pub fn start_pane_mcp(
             instructions: Some(
                 "This server controls ONE terminal pane of the shellrs app. Use \
                  shellrs_run_command to execute shell commands and read their output, \
-                 shellrs_press_key and shellrs_mouse_click to drive interactive programs, \
-                 shellrs_get_screen to inspect the current terminal, and \
+                 shellrs_press_key, shellrs_mouse_click and shellrs_mouse_drag to drive \
+                 interactive programs, shellrs_get_screen to inspect the current terminal, and \
                  shellrs_screenshot for an image of the pane. There is deliberately no \
                  tool to close the app."
                     .into(),
@@ -266,6 +272,7 @@ impl ServerHandler for PaneMcpHandler {
             PaneTools::RunCommandTool(t) => run_command(&self.shared, t).await,
             PaneTools::PressKeyTool(t) => press_key(&self.shared, t).await,
             PaneTools::MouseClickTool(t) => mouse_click(&self.shared, t).await,
+            PaneTools::MouseDragTool(t) => mouse_drag(&self.shared, t).await,
             PaneTools::InterruptTool(t) => {
                 let _ = t;
                 simple(&self.shared, McpQueryKind::Interrupt, "interrupt sent").await
@@ -369,22 +376,37 @@ async fn press_key(
     .await
 }
 
+/// Parse a tool's `button` argument (defaults to left).
+fn mouse_button_arg(button: Option<&str>) -> Result<crate::mouse::MouseButton, CallToolError> {
+    let named = button.unwrap_or("left").trim().to_ascii_lowercase();
+    match named.as_str() {
+        "left" | "" => Ok(crate::mouse::MouseButton::Left),
+        "middle" => Ok(crate::mouse::MouseButton::Middle),
+        "right" => Ok(crate::mouse::MouseButton::Right),
+        other => Err(CallToolError::from_message(format!(
+            "unknown button {other:?} (use left, middle or right)"
+        ))),
+    }
+}
+
+/// Await a query whose success reply is a short status string.
+async fn mouse_result(
+    shared: &McpShared,
+    kind: McpQueryKind,
+) -> Result<CallToolResult, CallToolError> {
+    match ask(shared, kind).await? {
+        McpReply::Text(text) => Ok(CallToolResult::text_content(vec![text_block(text)])),
+        McpReply::Err(e) => Err(CallToolError::from_message(e)),
+        _ => Err(CallToolError::from_message("pane returned no status")),
+    }
+}
+
 async fn mouse_click(
     shared: &McpShared,
     tool: MouseClickTool,
 ) -> Result<CallToolResult, CallToolError> {
-    let named = tool.button.as_deref().unwrap_or("left").trim().to_ascii_lowercase();
-    let button = match named.as_str() {
-        "left" | "" => crate::mouse::MouseButton::Left,
-        "middle" => crate::mouse::MouseButton::Middle,
-        "right" => crate::mouse::MouseButton::Right,
-        other => {
-            return Err(CallToolError::from_message(format!(
-                "unknown button {other:?} (use left, middle or right)"
-            )));
-        }
-    };
-    match ask(
+    let button = mouse_button_arg(tool.button.as_deref())?;
+    mouse_result(
         shared,
         McpQueryKind::Mouse {
             col: tool.col,
@@ -393,12 +415,24 @@ async fn mouse_click(
             modifier: tool.modifier,
         },
     )
-    .await?
-    {
-        McpReply::Text(text) => Ok(CallToolResult::text_content(vec![text_block(text)])),
-        McpReply::Err(e) => Err(CallToolError::from_message(e)),
-        _ => Err(CallToolError::from_message("pane returned no status")),
-    }
+    .await
+}
+
+async fn mouse_drag(
+    shared: &McpShared,
+    tool: MouseDragTool,
+) -> Result<CallToolResult, CallToolError> {
+    let button = mouse_button_arg(tool.button.as_deref())?;
+    mouse_result(
+        shared,
+        McpQueryKind::Drag {
+            from: (tool.col, tool.row),
+            to: (tool.to_col, tool.to_row),
+            button,
+            modifier: tool.modifier,
+        },
+    )
+    .await
 }
 
 //***********//
@@ -461,6 +495,34 @@ pub struct MouseClickTool {
 }
 
 #[mcp_tool(
+    name = "shellrs_mouse_drag",
+    title = "Drag in the pane",
+    description = "Press `button` at a start cell, move the pointer to an end cell, then \
+                   release, for interactive apps that enable mouse tracking. Coordinates are \
+                   zero-based cells within the pane's text grid: (`col`, `row`) is the start \
+                   and (`to_col`, `to_row`) the end. `button` is left (default), middle or \
+                   right, and `modifier` may contain Ctrl, Alt, Shift.",
+    destructive_hint = true
+)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
+pub struct MouseDragTool {
+    /// Zero-based start column, from the pane's left edge.
+    pub col: u16,
+    /// Zero-based start row, from the pane's top edge.
+    pub row: u16,
+    /// Zero-based end column.
+    pub to_col: u16,
+    /// Zero-based end row.
+    pub to_row: u16,
+    /// Mouse button: left (default), middle or right.
+    #[serde(default)]
+    pub button: Option<String>,
+    /// Optional modifier containing any of Ctrl, Alt, Shift.
+    #[serde(default)]
+    pub modifier: Option<String>,
+}
+
+#[mcp_tool(
     name = "shellrs_interrupt",
     title = "Interrupt the foreground process",
     description = "Send Ctrl+C (interrupt) to the pane, stopping whatever is running.",
@@ -505,6 +567,7 @@ tool_box!(
         RunCommandTool,
         PressKeyTool,
         MouseClickTool,
+        MouseDragTool,
         InterruptTool,
         GetScreenTool,
         ScreenshotTool,
@@ -547,6 +610,9 @@ mod tests {
                             | McpQueryKind::Interrupt => McpReply::Ok,
                             McpQueryKind::Mouse { button, .. } => {
                                 McpReply::Text(format!("clicked {button:?}"))
+                            }
+                            McpQueryKind::Drag { button, .. } => {
+                                McpReply::Text(format!("dragged {button:?}"))
                             }
                             McpQueryKind::Screen => McpReply::Text("SCREEN-CONTENT".into()),
                             McpQueryKind::Screenshot => {
@@ -646,6 +712,7 @@ mod tests {
             "shellrs_run_command",
             "shellrs_press_key",
             "shellrs_mouse_click",
+            "shellrs_mouse_drag",
             "shellrs_interrupt",
             "shellrs_get_screen",
             "shellrs_screenshot",
@@ -683,6 +750,13 @@ mod tests {
             serde_json::json!({ "col": 3, "row": 2, "button": "right" }),
         );
         assert!(click.contains("clicked Right"), "mouse_click: {click}");
+
+        let drag = call(
+            10,
+            "shellrs_mouse_drag",
+            serde_json::json!({ "col": 1, "row": 1, "to_col": 5, "to_row": 4 }),
+        );
+        assert!(drag.contains("dragged Left"), "mouse_drag: {drag}");
 
         let intr = call(6, "shellrs_interrupt", serde_json::json!({}));
         assert!(intr.contains("interrupt sent"), "interrupt: {intr}");
