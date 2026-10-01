@@ -11,7 +11,8 @@ use throbber_widgets_tui::ThrobberState;
 use tui_menu::{MenuEvent, MenuItem, MenuState};
 
 use crate::commands_db::{self, CommandDb, SavedCommand};
-use crate::config::{Config, FxKind, ThemeColors};use crate::font::FontEntry;
+use crate::config::{Config, FxKind, ThemeColors};
+use crate::font::FontEntry;
 use crate::image_view::ImageView;
 use crate::keys::{self, Key, KeyKind, KeyPress, Mods};
 use crate::layout::LayoutFile;
@@ -23,6 +24,7 @@ use crate::workspace::{Direction, SplitDir, Workspace};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
     RenameWorkspace,
+    RenamePane,
     ViewImage,
     AskAi,
     CheatSheet,
@@ -35,6 +37,7 @@ impl PromptKind {
             PromptKind::ViewImage => "image path>",
             PromptKind::AskAi => "ask AI>",
             PromptKind::CheatSheet => "cheat.sh topic>",
+            PromptKind::RenamePane => "rename pane>",
         }
     }
 
@@ -44,6 +47,7 @@ impl PromptKind {
             PromptKind::ViewImage => "e.g. screenshot.png",
             PromptKind::AskAi => "e.g. list the largest files here",
             PromptKind::CheatSheet => "e.g. tar",
+            PromptKind::RenamePane => "e.g coding pane",
         }
     }
 }
@@ -167,6 +171,7 @@ pub enum Command {
     NewWorkspace,
     CloseWorkspace,
     RenameWorkspace,
+    RenamePane,
     WorkspaceNext,
     WorkspacePrev,
     Inbox,
@@ -180,6 +185,7 @@ pub enum Command {
     YankLast,
     SelectMode,
     EditConfig,
+    ReloadConfig,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -215,6 +221,7 @@ impl Command {
         (Command::NewWorkspace, "New workspace"),
         (Command::CloseWorkspace, "Close workspace"),
         (Command::RenameWorkspace, "Rename workspace"),
+        (Command::RenamePane, "Rename Pane"),
         (Command::WorkspaceNext, "Next workspace"),
         (Command::WorkspacePrev, "Previous workspace"),
         (Command::Inbox, "Inbox (workspaces)"),
@@ -227,7 +234,8 @@ impl Command {
         (Command::SaveLayout, "Save layout"),
         (Command::YankLast, "Yank last output"),
         (Command::SelectMode, "Select mode"),
-        (Command::EditConfig, "Edit config & reload"),
+        (Command::EditConfig, "Edit config"),
+        (Command::ReloadConfig, "Reload config"),
         (Command::ZoomIn, "Zoom in"),
         (Command::ZoomOut, "Zoom out"),
         (Command::ZoomReset, "Zoom reset"),
@@ -258,7 +266,10 @@ impl SelectMode {
         let rows = lines.len() as u16;
         let cols = lines.first().map(|l| l.chars().count()).unwrap_or(0) as u16;
         let (cr, cc) = pane.screen().cursor_position();
-        let cur = (cr.min(rows.saturating_sub(1)), cc.min(cols.saturating_sub(1)));
+        let cur = (
+            cr.min(rows.saturating_sub(1)),
+            cc.min(cols.saturating_sub(1)),
+        );
         Self {
             lines,
             rows,
@@ -293,10 +304,7 @@ impl SelectMode {
     /// selection extends into history instead of jumping.
     fn refresh_after_scroll(&mut self, lines: Vec<String>, delta: i32) {
         self.rows = lines.len() as u16;
-        self.cols = lines
-            .first()
-            .map(|l| l.chars().count())
-            .unwrap_or(0) as u16;
+        self.cols = lines.first().map(|l| l.chars().count()).unwrap_or(0) as u16;
         self.lines = lines;
         if self.rows == 0 {
             self.cur = (0, 0);
@@ -359,7 +367,9 @@ impl SelectMode {
             'w' => {
                 let (mut s, mut e) = (col as usize, col as usize);
                 let at = chars.get(col as usize).copied();
-                let prev = col.checked_sub(1).and_then(|c| chars.get(c as usize).copied());
+                let prev = col
+                    .checked_sub(1)
+                    .and_then(|c| chars.get(c as usize).copied());
                 // Anchor on the word under the cursor, or the one just left.
                 if at.map(is_word_char) != Some(true) && prev.map(is_word_char) == Some(true) {
                     s = col.saturating_sub(1) as usize;
@@ -382,7 +392,11 @@ impl SelectMode {
             }
             '"' | '\'' => {
                 if let Some((s, e)) = pair_bounds(&chars, col, obj, obj) {
-                    let (s, e) = if inner { (s + 1, e.saturating_sub(1)) } else { (s, e) };
+                    let (s, e) = if inner {
+                        (s + 1, e.saturating_sub(1))
+                    } else {
+                        (s, e)
+                    };
                     self.set_selection(s, e);
                 }
             }
@@ -396,7 +410,11 @@ impl SelectMode {
     /// Helper for bracket-like pairs.
     fn pair_object(&mut self, chars: &[char], col: u16, open: char, close: char, inner: bool) {
         if let Some((s, e)) = pair_bounds(chars, col, open, close) {
-            let (s, e) = if inner { (s + 1, e.saturating_sub(1)) } else { (s, e) };
+            let (s, e) = if inner {
+                (s + 1, e.saturating_sub(1))
+            } else {
+                (s, e)
+            };
             self.set_selection(s, e);
         }
     }
@@ -476,9 +494,10 @@ impl SelectMode {
                 .find(|(_, c)| **c == target)
                 .map(|(i, _)| i);
             if let Some(i) = hit
-                && i > col + 1 {
-                    self.cur = (row, (i - 1) as u16);
-                }
+                && i > col + 1
+            {
+                self.cur = (row, (i - 1) as u16);
+            }
         } else {
             let hit = chars
                 .iter()
@@ -488,9 +507,10 @@ impl SelectMode {
                 .find(|(_, c)| **c == target)
                 .map(|(i, _)| i);
             if let Some(i) = hit
-                && i + 1 < col {
-                    self.cur = (row, (i + 1) as u16);
-                }
+                && i + 1 < col
+            {
+                self.cur = (row, (i + 1) as u16);
+            }
         }
     }
 
@@ -984,7 +1004,13 @@ impl CommandPicker {
                             .fuzzy_indices(&c.command, q)
                             .map(|(_, i)| i)
                             .unwrap_or_default();
-                        (score, CommandHit { item: c.clone(), indices })
+                        (
+                            score,
+                            CommandHit {
+                                item: c.clone(),
+                                indices,
+                            },
+                        )
                     })
                 })
                 .collect()
@@ -1054,7 +1080,10 @@ impl CheatPicker {
             query: String::new(),
             items: entries
                 .into_iter()
-                .map(|entry| CheatPickItem { entry, checked: false })
+                .map(|entry| CheatPickItem {
+                    entry,
+                    checked: false,
+                })
                 .collect(),
             results: Vec::new(),
             selected: 0,
@@ -1077,7 +1106,15 @@ impl CheatPicker {
             self.items
                 .iter()
                 .enumerate()
-                .map(|(index, _)| (0, CheatHit { index, indices: Vec::new() }))
+                .map(|(index, _)| {
+                    (
+                        0,
+                        CheatHit {
+                            index,
+                            indices: Vec::new(),
+                        },
+                    )
+                })
                 .collect()
         } else {
             self.items
@@ -1124,9 +1161,10 @@ impl CheatPicker {
     /// Tick/untick the highlighted row.
     fn toggle_selected(&mut self) {
         if let Some(hit) = self.results.get(self.selected)
-            && let Some(item) = self.items.get_mut(hit.index) {
-                item.checked = !item.checked;
-            }
+            && let Some(item) = self.items.get_mut(hit.index)
+        {
+            item.checked = !item.checked;
+        }
     }
 
     /// Tick (`on`) or clear (`!on`) every currently shown row.
@@ -1256,11 +1294,11 @@ impl FontPicker {
         // shows immediately; auto-detect keeps the "system default" row.
         if !p.active.trim().is_empty()
             && let Some(i) = p.results.iter().position(|h| {
-                !h.item.path.as_os_str().is_empty()
-                    && h.item.path.to_string_lossy() == p.active
-            }) {
-                p.selected = i;
-            }
+                !h.item.path.as_os_str().is_empty() && h.item.path.to_string_lossy() == p.active
+            })
+        {
+            p.selected = i;
+        }
         p
     }
 
@@ -1554,7 +1592,11 @@ impl CommandArgs {
         self.names
             .iter()
             .cloned()
-            .zip(self.fields.iter().map(|f| f.lines().join(" ").trim().to_string()))
+            .zip(
+                self.fields
+                    .iter()
+                    .map(|f| f.lines().join(" ").trim().to_string()),
+            )
             .collect()
     }
 }
@@ -1600,10 +1642,6 @@ pub struct App {
     /// Pending primary-font change for the window host to apply: the new
     /// `[general] font` value (empty = auto-detect).
     font_request: Option<String>,
-    /// Config file mtime at last load, for hot reload.
-    config_mtime: Option<std::time::SystemTime>,
-    /// Frame counter for throttled hot-reload checks.
-    reload_tick: u32,
     /// cwd generation last used to build ghost completions; when the shell
     /// replies with a fresher cwd, completions are rebuilt.
     cwd_seq_seen: u64,
@@ -1728,7 +1766,8 @@ impl App {
         let (share_query_tx, share_query_rx) = crossbeam_channel::unbounded();
         let mut app = Self {
             config,
-            braille: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),            workspaces,
+            braille: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            workspaces,
             current: 0,
             prompt: None,
             menu: MenuState::new(Vec::new()),
@@ -1748,8 +1787,6 @@ impl App {
             font_preview_loading: false,
             font_preview_sent: None,
             font_request: None,
-            config_mtime: None,
-            reload_tick: 0,
             cwd_seq_seen: 0,
             ai_rx: None,
             cheat_rx: None,
@@ -1786,12 +1823,6 @@ impl App {
         };
         app.ws_mut().mark_seen();
         // Baseline mtime so hot-reload only fires on later changes.
-        app.config_mtime = app
-            .config
-            .source
-            .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
         log::info!(
             "booted with {} workspace(s), layout {}",
             app.workspaces.len(),
@@ -1814,8 +1845,21 @@ impl App {
         tachyonfx::Duration::from_millis(dt.as_millis().clamp(1, u32::MAX as u128) as u32)
     }
 
+    /// True while the UI is mid-animation: a running tachyonfx transition, the
+    /// font-preview spinner, or a pane playing its close effect. The event loop
+    /// keeps requesting frames while this holds; once it clears, an idle app
+    /// redraws only on input/output (see `poll_panes`).
+    pub fn is_animating(&self) -> bool {
+        self.effects.is_running() || self.font_preview_loading || !self.closing.is_empty()
+    }
+
     /// Queue a transition for `pane` (fired by ui once layout is known).
     pub fn queue_fx(&mut self, pane: usize, kind: FxKind) {
+        // The first frame of an effect runs on the next redraw, which may be
+        // much later than the previous one (idle app). Restart the frame clock
+        // so the effect does not see the whole idle gap as elapsed time and
+        // jump straight to its end.
+        self.last_frame = std::time::Instant::now();
         self.pending_fx.push(PendingFx { pane, kind });
     }
 
@@ -1861,9 +1905,10 @@ impl App {
 
     /// Complete close transitions whose effect has played out.
     /// Called every frame from [`App::poll_panes`].
-    fn poll_closing(&mut self) {
+    fn poll_closing(&mut self) -> bool {
         let now = std::time::Instant::now();
         let mut i = 0;
+        let mut changed = false;
         while i < self.closing.len() {
             if now >= self.closing[i].until {
                 let c = self.closing.remove(i);
@@ -1874,10 +1919,12 @@ impl App {
                 if empty {
                     self.drop_workspace(c.ws);
                 }
+                changed = true;
             } else {
                 i += 1;
             }
         }
+        changed
     }
 
     /// Drop workspace `idx`, shifting pending-close indices above the gap.
@@ -1947,8 +1994,7 @@ impl App {
                 self.closing.push(ClosingPane {
                     ws: ws_idx,
                     id,
-                    until: std::time::Instant::now()
-                        + std::time::Duration::from_millis(ms as u64),
+                    until: std::time::Instant::now() + std::time::Duration::from_millis(ms as u64),
                 });
                 self.queue_fx(id, FxKind::Close);
             }
@@ -2045,39 +2091,49 @@ impl App {
         self.image.as_mut().map(|i| std::mem::take(&mut i.rgba))
     }
 
-    /// Poll every workspace (background panes keep running).
-    pub fn poll_panes(&mut self) {
+    /// Poll every workspace (background panes keep running). Returns true when
+    /// anything changed that the next frame should show, so the event loop can
+    /// skip the (expensive) redraw when the app is idle.
+    pub fn poll_panes(&mut self) -> bool {
         // Collect deaths first; route them in descending workspace order so
         // dropping a workspace never shifts an unprocessed index.
         let mut deaths = Vec::new();
+        let activity_before: u64 = self.workspaces.iter().map(|w| w.activity).sum();
         for (i, w) in self.workspaces.iter_mut().enumerate() {
             for id in w.poll_panes() {
                 deaths.push((i, id));
             }
         }
         deaths.sort_by(|a, b| b.cmp(a));
+        let had_deaths = !deaths.is_empty();
         for (i, id) in deaths {
             self.on_pane_died(i, id);
         }
-        self.poll_closing();
-        self.poll_ai();
-        self.poll_cheat();
-        self.poll_font_preview();
-        self.poll_cwd_reply();
-        self.poll_ipc();
-        self.poll_http();
-        self.poll_mcp();
-        self.poll_share();
-        self.hot_reload_check();
+        let activity_after: u64 = self.workspaces.iter().map(|w| w.activity).sum();
+        let mut changed = had_deaths || activity_after != activity_before;
+        changed |= self.poll_closing();
+        changed |= self.poll_ai();
+        changed |= self.poll_cheat();
+        changed |= self.poll_font_preview();
+        changed |= self.poll_cwd_reply();
+        changed |= self.poll_ipc();
+        changed |= self.poll_http();
+        changed |= self.poll_mcp();
+        changed |= self.poll_share();
+        changed
     }
 
-    /// Handle pending HTTP server commands.
-    fn poll_http(&mut self) {
-        let Some(rx) = &self.http_cmd_rx else { return };
+    /// Handle pending HTTP server commands. Returns true when at least one
+    /// command was handled.
+    fn poll_http(&mut self) -> bool {
+        let Some(rx) = &self.http_cmd_rx else {
+            return false;
+        };
         let mut commands = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
             commands.push(cmd);
         }
+        let changed = !commands.is_empty();
         for cmd in commands {
             match cmd {
                 crate::server::ServerCommand::KeyPress { key, modifier } => {
@@ -2103,6 +2159,7 @@ impl App {
                 }
             }
         }
+        changed
     }
 
     /// Handle a key press from the HTTP server.
@@ -2110,9 +2167,15 @@ impl App {
         use crate::keys::{Key, KeyKind, KeyPress, Mods};
         let mut mods = Mods::empty();
         if let Some(m) = modifier {
-            if m.contains("Ctrl") { mods.insert(Mods::CONTROL); }
-            if m.contains("Alt") { mods.insert(Mods::ALT); }
-            if m.contains("Shift") { mods.insert(Mods::SHIFT); }
+            if m.contains("Ctrl") {
+                mods.insert(Mods::CONTROL);
+            }
+            if m.contains("Alt") {
+                mods.insert(Mods::ALT);
+            }
+            if m.contains("Shift") {
+                mods.insert(Mods::SHIFT);
+            }
         }
         let k = match key.as_str() {
             "Enter" => Key::Enter,
@@ -2237,10 +2300,22 @@ impl App {
                     vt100::Color::Default => [0, 0, 0, 255],
                     vt100::Color::Idx(i) => {
                         let colors = [
-                            [0, 0, 0, 255], [128, 0, 0, 255], [0, 128, 0, 255], [128, 128, 0, 255],
-                            [0, 0, 128, 255], [128, 0, 128, 255], [0, 128, 128, 255], [192, 192, 192, 255],
-                            [128, 128, 128, 255], [255, 0, 0, 255], [0, 255, 0, 255], [255, 255, 0, 255],
-                            [0, 0, 255, 255], [255, 0, 255, 255], [0, 255, 255, 255], [255, 255, 255, 255],
+                            [0, 0, 0, 255],
+                            [128, 0, 0, 255],
+                            [0, 128, 0, 255],
+                            [128, 128, 0, 255],
+                            [0, 0, 128, 255],
+                            [128, 0, 128, 255],
+                            [0, 128, 128, 255],
+                            [192, 192, 192, 255],
+                            [128, 128, 128, 255],
+                            [255, 0, 0, 255],
+                            [0, 255, 0, 255],
+                            [255, 255, 0, 255],
+                            [0, 0, 255, 255],
+                            [255, 0, 255, 255],
+                            [0, 255, 255, 255],
+                            [255, 255, 255, 255],
                         ];
                         colors.get(i as usize).copied().unwrap_or([0, 0, 0, 255])
                     }
@@ -2320,17 +2395,19 @@ impl App {
     }
 
     /// Answer pending MCP tool calls, then stop servers whose pane is gone.
-    fn poll_mcp(&mut self) {
+    fn poll_mcp(&mut self) -> bool {
         let queries: Vec<crate::mcp::McpQuery> = match &self.mcp_query_rx {
             Some(rx) => rx.try_iter().collect(),
             None => Vec::new(),
         };
+        let mut changed = !queries.is_empty();
         for q in queries {
             let pane_id = q.pane_id;
             let reply = self.mcp_handle_query(pane_id, q.kind);
             let _ = q.reply.send(reply);
         }
-        self.mcp_reconcile();
+        changed |= self.mcp_reconcile();
+        changed
     }
 
     fn mcp_handle_query(
@@ -2412,7 +2489,11 @@ impl App {
     /// the inner (border-inset) grid size. Mouse helpers translate pane-relative
     /// cells through this rect; `mouse_button`/`mouse_move` read `self.ws()`.
     fn mcp_pane_grid(&mut self, pane_id: usize) -> Result<(Rect, u16, u16), String> {
-        let Some(ws_idx) = self.workspaces.iter().position(|w| w.pane(pane_id).is_some()) else {
+        let Some(ws_idx) = self
+            .workspaces
+            .iter()
+            .position(|w| w.pane(pane_id).is_some())
+        else {
             return Err(format!("pane {pane_id} is gone"));
         };
         if ws_idx != self.current {
@@ -2422,7 +2503,11 @@ impl App {
             return Err(format!("pane {pane_id} is not laid out yet"));
         };
         // Panes draw a one-cell border, so the inner grid starts at +1.
-        Ok((rect, rect.width.saturating_sub(2), rect.height.saturating_sub(2)))
+        Ok((
+            rect,
+            rect.width.saturating_sub(2),
+            rect.height.saturating_sub(2),
+        ))
     }
 
     /// True when a mouse report at either press or release reached the pane.
@@ -2606,7 +2691,9 @@ impl App {
 
     /// JSON description of a pane for the MCP `termrs_pane_info` tool.
     fn mcp_pane_info(&self, pane_id: usize) -> Result<String, String> {
-        let pane = self.find_pane(pane_id).ok_or_else(|| format!("pane {pane_id} is gone"))?;
+        let pane = self
+            .find_pane(pane_id)
+            .ok_or_else(|| format!("pane {pane_id} is gone"))?;
         let workspace = self
             .workspaces
             .iter()
@@ -2623,13 +2710,15 @@ impl App {
     }
 
     /// Stop MCP servers whose pane was closed; refresh the rest's status line.
-    fn mcp_reconcile(&mut self) {
+    fn mcp_reconcile(&mut self) -> bool {
+        let mut changed = false;
         let ids: Vec<usize> = self.mcp_servers.keys().copied().collect();
         for id in ids {
             if self.find_pane(id).is_none()
                 && let Some(mut server) = self.mcp_servers.remove(&id)
             {
                 server.stop();
+                changed = true;
                 log::info!("MCP server for pane {id} stopped (pane closed)");
             }
         }
@@ -2639,10 +2728,14 @@ impl App {
             .map(|(id, server)| (*id, server.shared.status()))
             .collect();
         for (id, text) in statuses {
-            if let Some(p) = self.find_pane_mut(id) {
+            if let Some(p) = self.find_pane_mut(id)
+                && p.mcp_status.as_deref() != Some(text.as_str())
+            {
                 p.mcp_status = Some(text);
+                changed = true;
             }
         }
+        changed
     }
 
     /// Start (or toggle off) sharing the focused pane over iroh.
@@ -2702,16 +2795,18 @@ impl App {
 
     /// Answer pending share-viewer queries, then stop sessions whose pane is
     /// gone and refresh the rest's status line.
-    fn poll_share(&mut self) {
+    fn poll_share(&mut self) -> bool {
         let queries: Vec<crate::share::ShareQuery> = match &self.share_query_rx {
             Some(rx) => rx.try_iter().collect(),
             None => Vec::new(),
         };
+        let mut changed = !queries.is_empty();
         for q in queries {
             let reply = self.share_handle_query(q.pane_id, q.kind);
             let _ = q.reply.send(reply);
         }
-        self.share_reconcile();
+        changed |= self.share_reconcile();
+        changed
     }
 
     fn share_handle_query(
@@ -2738,12 +2833,7 @@ impl App {
     /// Build a viewer snapshot: clear, re-assert input modes (application
     /// cursor/keypad, bracketed paste, mouse), repaint the screen, place the
     /// cursor, and prefix the pane's grid size so the viewer can match it.
-    fn share_snapshot(
-        &self,
-        pane_id: usize,
-        _cols: u16,
-        _rows: u16,
-    ) -> Result<Vec<u8>, String> {
+    fn share_snapshot(&self, pane_id: usize, _cols: u16, _rows: u16) -> Result<Vec<u8>, String> {
         let pane = self
             .find_pane(pane_id)
             .ok_or_else(|| format!("pane {pane_id} is gone"))?;
@@ -2759,13 +2849,15 @@ impl App {
     }
 
     /// Stop share sessions whose pane closed; refresh the rest's status line.
-    fn share_reconcile(&mut self) {
+    fn share_reconcile(&mut self) -> bool {
+        let mut changed = false;
         let ids: Vec<usize> = self.share_sessions.keys().copied().collect();
         for id in ids {
             if self.find_pane(id).is_none()
                 && let Some(mut session) = self.share_sessions.remove(&id)
             {
                 session.stop();
+                changed = true;
                 log::info!("share pane {id} stopped (pane closed)");
             }
         }
@@ -2775,19 +2867,27 @@ impl App {
             .map(|(id, s)| (*id, format!("SHARE · code {}", s.code)))
             .collect();
         for (id, text) in statuses {
-            if let Some(p) = self.find_pane_mut(id) {
+            if let Some(p) = self.find_pane_mut(id)
+                && p.share_status.as_deref() != Some(text.as_str())
+            {
                 p.share_status = Some(text);
+                changed = true;
             }
         }
+        changed
     }
 
-    /// Handle pending IPC commands from external CLI clients.
-    fn poll_ipc(&mut self) {
-        let Some(rx) = &self.ipc_cmd_rx else { return };
+    /// Handle pending IPC commands from external CLI clients. Returns true when
+    /// at least one command was handled.
+    fn poll_ipc(&mut self) -> bool {
+        let Some(rx) = &self.ipc_cmd_rx else {
+            return false;
+        };
         let mut commands = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
             commands.push(cmd);
         }
+        let changed = !commands.is_empty();
         for cmd in commands {
             match cmd {
                 crate::ipc::IpcCommand::SplitPane { args, dir } => {
@@ -2797,18 +2897,23 @@ impl App {
                     }
                 }
                 crate::ipc::IpcCommand::ListPanes => {
-                    let panes: Vec<crate::ipc::PaneInfo> = self.workspaces.iter().enumerate().flat_map(|(ws_idx, ws)| {
-                        ws.leaf_ids().into_iter().filter_map(move |id| {
-                            let pane = ws.pane(id)?;
-                            Some(crate::ipc::PaneInfo {
-                                pane_id: id,
-                                workspace: ws_idx,
-                                title: pane.title.clone(),
-                                dead: pane.dead,
-                                cwd: pane.cwd().to_string_lossy().into_owned(),
+                    let panes: Vec<crate::ipc::PaneInfo> = self
+                        .workspaces
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(ws_idx, ws)| {
+                            ws.leaf_ids().into_iter().filter_map(move |id| {
+                                let pane = ws.pane(id)?;
+                                Some(crate::ipc::PaneInfo {
+                                    pane_id: id,
+                                    workspace: ws_idx,
+                                    title: pane.title.clone(),
+                                    dead: pane.dead,
+                                    cwd: pane.cwd().to_string_lossy().into_owned(),
+                                })
                             })
                         })
-                    }).collect();
+                        .collect();
                     if let Some(tx) = &self.ipc_resp_tx {
                         let _ = tx.send(crate::ipc::Response {
                             ok: true,
@@ -2820,21 +2925,32 @@ impl App {
                 }
             }
         }
+        changed
     }
 
     /// Handle a split-pane IPC command: split the focused pane and type the
     /// command into the new pane.
-    fn handle_split_pane_ipc(&mut self, args: Vec<String>, _dir: Option<PathBuf>) -> crate::ipc::Response {
+    fn handle_split_pane_ipc(
+        &mut self,
+        args: Vec<String>,
+        _dir: Option<PathBuf>,
+    ) -> crate::ipc::Response {
         let shell = self.config.general.shell.clone();
         let scrollback = self.config.general.scrollback;
         let rt = self.rt.clone();
-        match self.ws_mut().split(crate::workspace::SplitDir::Vertical, &shell, scrollback, &rt) {
+        match self.ws_mut().split(
+            crate::workspace::SplitDir::Vertical,
+            &shell,
+            scrollback,
+            &rt,
+        ) {
             Ok(new_id) => {
                 let cmd = args.join(" ");
                 if !cmd.is_empty()
-                    && let Some(p) = self.ws_mut().pane_mut(new_id) {
-                        p.write(format!("{cmd}\r").as_bytes());
-                    }
+                    && let Some(p) = self.ws_mut().pane_mut(new_id)
+                {
+                    p.write(format!("{cmd}\r").as_bytes());
+                }
                 crate::ipc::Response {
                     ok: true,
                     pane_id: Some(new_id),
@@ -2853,18 +2969,21 @@ impl App {
 
     /// When the shell answers a cwd query, rebuild the prompt's completion so
     /// it reflects the fresh directory immediately (no re-pressing ctrl+i).
-    fn poll_cwd_reply(&mut self) {
+    fn poll_cwd_reply(&mut self) -> bool {
         if self.prompt.is_none() {
-            return;
+            return false;
         }
         let fid = self.ws().focused;
         let seq = match self.ws().pane(fid) {
             Some(p) => p.cwd_seq(),
-            None => return,
+            None => return false,
         };
         if seq != self.cwd_seq_seen {
             self.cwd_seq_seen = seq;
             self.update_prompt_ghost();
+            true
+        } else {
+            false
         }
     }
 
@@ -3075,7 +3194,9 @@ impl App {
                 return true;
             }
             Key::Enter if ev.mods.is_empty() => {
-                let Some(p) = self.prompt.take() else { return true };
+                let Some(p) = self.prompt.take() else {
+                    return true;
+                };
                 self.submit_prompt(p.kind, &p.text());
                 return true;
             }
@@ -3219,7 +3340,8 @@ impl App {
                         .pane(fid)
                         .map(|p| p.cwd().to_path_buf())
                         .unwrap_or_else(|| {
-                            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                            std::env::current_dir()
+                                .unwrap_or_else(|_| std::path::PathBuf::from("."))
                         });
                     let p = cwd.join(candidate);
                     if p.exists() {
@@ -3239,6 +3361,16 @@ impl App {
             }
             PromptKind::AskAi => self.ask_ai(input),
             PromptKind::CheatSheet => self.import_cheat_sheet(input),
+            PromptKind::RenamePane => {
+                let name: String = input.lines().next().unwrap_or("ws").trim().into();
+                if !name.is_empty() {
+                    let pane_id = self.ws().focused;
+                    if let Some(pane) = self.ws_mut().pane_mut(pane_id) {
+                        pane.title = name.clone();
+                        self.status = format!("Pane{pane_id} renamed to {name}");
+                    }
+                }
+            }
         }
     }
 
@@ -3270,12 +3402,12 @@ impl App {
 
     /// Poll the pending cheat.sh import; open the review picker with the
     /// fresh rows (already-saved ones filtered out).
-    fn poll_cheat(&mut self) {
+    fn poll_cheat(&mut self) -> bool {
         let result = match self.cheat_rx.as_ref() {
-            None => return,
+            None => return false,
             Some(rx) => match rx.try_recv() {
                 Ok(r) => r,
-                Err(crossbeam_channel::TryRecvError::Empty) => return,
+                Err(crossbeam_channel::TryRecvError::Empty) => return false,
                 Err(_) => Err("import worker vanished".into()),
             },
         };
@@ -3285,27 +3417,34 @@ impl App {
             Err(e) => {
                 log::warn!("cheat.sh import error: {e}");
                 self.status = format!("import error: {e}");
-                return;
+                return true;
             }
         };
         if import.entries.is_empty() {
             self.status = format!("cheat.sh: no commands found for {:?}", import.topic);
-            return;
+            return true;
         }
         let existing: std::collections::HashSet<String> = match &self.db {
-            Some(db) => db.all().unwrap_or_default().into_iter().map(|c| c.command).collect(),
+            Some(db) => db
+                .all()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| c.command)
+                .collect(),
             None => {
                 self.status = format!("import failed: no database ({})", self.db_path.display());
-                return;
+                return true;
             }
         };
         let total = import.entries.len();
         let fresh = crate::cheatsheet::dedupe_new(import.entries, &existing);
         let dupes = total.saturating_sub(fresh.len());
         if fresh.is_empty() {
-            self.status =
-                format!("cheat.sh: nothing new for {:?} ({dupes} already saved)", import.topic);
-            return;
+            self.status = format!(
+                "cheat.sh: nothing new for {:?} ({dupes} already saved)",
+                import.topic
+            );
+            return true;
         }
         self.status = if dupes > 0 {
             format!(
@@ -3313,9 +3452,13 @@ impl App {
                 import.topic
             )
         } else {
-            format!("cheat.sh/{}: tick rows (space), ctrl+e edit, enter adds", import.topic)
+            format!(
+                "cheat.sh/{}: tick rows (space), ctrl+e edit, enter adds",
+                import.topic
+            )
         };
         self.cheat_picker = Some(CheatPicker::new(import.topic, fresh));
+        true
     }
 
     /// Keys while the import review picker is open: space ticks the row,
@@ -3344,9 +3487,10 @@ impl App {
                 // import row (Enter rewrites it, Esc returns here).
                 Key::Char('e') if ctrl => {
                     if let Some(hit) = p.results.get(p.selected)
-                        && let Some(item) = p.items.get(hit.index) {
-                            edit = Some((hit.index, item.entry.clone()));
-                        }
+                        && let Some(item) = p.items.get(hit.index)
+                    {
+                        edit = Some((hit.index, item.entry.clone()));
+                    }
                 }
                 Key::Backspace => p.backspace(),
                 Key::Char(_) => {
@@ -3362,8 +3506,7 @@ impl App {
             }
         }
         if let Some((index, entry)) = edit {
-            self.status =
-                format!("editing import row #{index} (tab field, enter save, esc back)");
+            self.status = format!("editing import row #{index} (tab field, enter save, esc back)");
             self.command_form = Some(CommandForm::edit_cheat(index, &entry));
             return;
         }
@@ -3457,12 +3600,12 @@ impl App {
     }
 
     /// Poll the pending AI request; type its command into the focused pane.
-    fn poll_ai(&mut self) {
+    fn poll_ai(&mut self) -> bool {
         let result = match self.ai_rx.as_ref() {
-            None => return,
+            None => return false,
             Some(rx) => match rx.try_recv() {
                 Ok(r) => r,
-                Err(crossbeam_channel::TryRecvError::Empty) => return,
+                Err(crossbeam_channel::TryRecvError::Empty) => return false,
                 Err(_) => Err("AI worker vanished".into()),
             },
         };
@@ -3481,6 +3624,7 @@ impl App {
                 self.status = format!("AI error: {e}");
             }
         }
+        true
     }
 
     /// Split focused leaf of current workspace; focus the new pane.
@@ -3525,8 +3669,7 @@ impl App {
                 self.closing.push(ClosingPane {
                     ws: self.current,
                     id: target,
-                    until: std::time::Instant::now()
-                        + std::time::Duration::from_millis(ms as u64),
+                    until: std::time::Instant::now() + std::time::Duration::from_millis(ms as u64),
                 });
                 self.queue_fx(target, FxKind::Close);
             }
@@ -3639,7 +3782,11 @@ impl App {
         self.font_preview_loading = false;
         self.font_preview_sent = None;
         self.start_preview_worker();
-        self.font_picker = Some(FontPicker::new(fonts, &self.config.general.font, self.font_size));
+        self.font_picker = Some(FontPicker::new(
+            fonts,
+            &self.config.general.font,
+            self.font_size,
+        ));
         self.status.clear();
         self.request_font_preview();
     }
@@ -3669,14 +3816,8 @@ impl App {
                         fg,
                         bg,
                     } = cur;
-                    let result = crate::font::render_preview(
-                        &path,
-                        &name,
-                        PREVIEW_BODY,
-                        title_px,
-                        fg,
-                        bg,
-                    );
+                    let result =
+                        crate::font::render_preview(&path, &name, PREVIEW_BODY, title_px, fg, bg);
                     // A newer request that arrived mid-render wins; this stale
                     // result is dropped instead of flashing on screen.
                     if req_rx.is_empty() {
@@ -3723,10 +3864,7 @@ impl App {
             self.font_preview_loading = false;
             return;
         }
-        let key = (
-            hit.item.path.to_string_lossy().into_owned(),
-            p.size,
-        );
+        let key = (hit.item.path.to_string_lossy().into_owned(), p.size);
         if self.font_preview_sent.as_ref() == Some(&key) {
             return;
         }
@@ -3747,12 +3885,12 @@ impl App {
     }
 
     /// Drain finished preview renders; only the latest generation applies.
-    fn poll_font_preview(&mut self) {
+    fn poll_font_preview(&mut self) -> bool {
         let mut latest: Option<PreviewOutcome> = None;
         loop {
             match self.font_preview_rx.as_ref() {
-                None => return,
-                Some(rx) =>                 match rx.try_recv() {
+                None => return false,
+                Some(rx) => match rx.try_recv() {
                     Ok(out) => latest = Some(out),
                     Err(crossbeam_channel::TryRecvError::Empty) => break,
                     Err(crossbeam_channel::TryRecvError::Disconnected) => {
@@ -3766,7 +3904,7 @@ impl App {
         }
         if let Some(out) = latest {
             if out.generation != self.font_preview_gen {
-                return; // Stale: the picker already moved on.
+                return false; // Stale: the picker already moved on.
             }
             self.font_preview_loading = false;
             match out.result {
@@ -3789,6 +3927,9 @@ impl App {
                     self.font_preview = None;
                 }
             }
+            true
+        } else {
+            false
         }
     }
 
@@ -3824,14 +3965,9 @@ impl App {
             match p.focus {
                 PickerFocus::Size => match ev.key {
                     Key::Enter => {
-                        pick = p
-                            .results
-                            .get(p.selected)
-                            .map(|h| (h.item.clone(), h.mono))
+                        pick = p.results.get(p.selected).map(|h| (h.item.clone(), h.mono))
                     }
-                    Key::Up | Key::Char('k') | Key::Char('+') | Key::Char('=') => {
-                        p.nudge_size(1)
-                    }
+                    Key::Up | Key::Char('k') | Key::Char('+') | Key::Char('=') => p.nudge_size(1),
                     Key::Down | Key::Char('j') | Key::Char('-') | Key::Char('_') => {
                         p.nudge_size(-1)
                     }
@@ -3841,10 +3977,7 @@ impl App {
                 },
                 PickerFocus::List => match ev.key {
                     Key::Enter => {
-                        pick = p
-                            .results
-                            .get(p.selected)
-                            .map(|h| (h.item.clone(), h.mono))
+                        pick = p.results.get(p.selected).map(|h| (h.item.clone(), h.mono))
                     }
                     Key::Up => p.move_sel(-1),
                     Key::Down => p.move_sel(1),
@@ -4034,7 +4167,8 @@ impl App {
             self.menu.down();
         }
         self.menu_open = true;
-        self.status = "menu: h/l or arrows pick, J/K move workspace, enter select, esc close".into();
+        self.status =
+            "menu: h/l or arrows pick, J/K move workspace, enter select, esc close".into();
         log::info!("inbox opened ({} workspaces)", self.workspaces.len());
     }
 
@@ -4204,7 +4338,10 @@ impl App {
     /// Open the saved-command picker (ctrl+r), loading the database fresh.
     fn open_commands(&mut self) {
         let Some(db) = &self.db else {
-            self.status = format!("commands: database unavailable ({})", self.db_path.display());
+            self.status = format!(
+                "commands: database unavailable ({})",
+                self.db_path.display()
+            );
             return;
         };
         let path = db.path().display().to_string();
@@ -4242,9 +4379,7 @@ impl App {
                 Key::Char('n') if ctrl => p.move_sel(1),
                 // Ctrl+e opens the two-column edit table for the highlighted
                 // row (Enter there updates it in place, Esc returns here).
-                Key::Char('e') if ctrl => {
-                    edit = p.results.get(p.selected).map(|h| h.item.clone())
-                }
+                Key::Char('e') if ctrl => edit = p.results.get(p.selected).map(|h| h.item.clone()),
                 Key::Delete => delete = p.results.get(p.selected).map(|h| h.item.id),
                 Key::Backspace => p.backspace(),
                 Key::Char(_) | Key::Space => {
@@ -4272,9 +4407,10 @@ impl App {
         }
         if let Some(id) = delete {
             if let Some(db) = &self.db
-                && let Err(e) = db.delete(id) {
-                    self.status = format!("delete failed: {e}");
-                }
+                && let Err(e) = db.delete(id)
+            {
+                self.status = format!("delete failed: {e}");
+            }
             if let Some(p) = self.command_picker.as_mut() {
                 p.remove_id(id);
             }
@@ -4301,9 +4437,10 @@ impl App {
     /// Type a saved command into the focused pane and run it.
     fn run_saved(&mut self, id: i64, text: String) {
         if let Some(db) = &self.db
-            && let Err(e) = db.mark_used(id) {
-                log::warn!("command db mark_used: {e}");
-            }
+            && let Err(e) = db.mark_used(id)
+        {
+            log::warn!("command db mark_used: {e}");
+        }
         log::info!("command run: {text}");
         self.run_in_pane(&text);
         self.status = format!("run: {text}");
@@ -4381,10 +4518,11 @@ impl App {
             // Rewrite the pending cheat.sh row in place; nothing is saved
             // to the database until the import is confirmed.
             if let Some(p) = self.cheat_picker.as_mut()
-                && let Some(item) = p.items.get_mut(index) {
-                    item.entry.command = command.clone();
-                    item.entry.comment = comment;
-                }
+                && let Some(item) = p.items.get_mut(index)
+            {
+                item.entry.command = command.clone();
+                item.entry.comment = comment;
+            }
             self.status = format!("edited import row: {command}");
             return;
         }
@@ -4518,6 +4656,10 @@ impl App {
             }
             Command::Help => self.about = !self.about,
             Command::Quit => self.should_quit = true,
+            Command::RenamePane => {
+                self.prompt = Some(Prompt::open(PromptKind::RenamePane));
+            }
+            Command::ReloadConfig => self.reload_config(),
         }
     }
 
@@ -4576,7 +4718,14 @@ impl App {
     /// ("ctrl" default; "alt"/"shift" work, anything else falls back to
     /// ctrl so plain clicks never open links by accident).
     fn url_mods(&self) -> Mods {
-        match self.config.mouse.url_mod.trim().to_ascii_lowercase().as_str() {
+        match self
+            .config
+            .mouse
+            .url_mod
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "alt" => Mods::ALT,
             "shift" => Mods::SHIFT,
             _ => Mods::CONTROL,
@@ -4823,18 +4972,20 @@ impl App {
         if !self.config.mouse.enabled || self.mode() != Mode::Normal {
             return MouseClickOutcome::Ignored;
         }
-        if pressed && mods.contains(self.url_mods())
-            && let Some(url) = self.url_at(col, row) {
-                if crate::mouse::is_openable_url(&url) {
-                    log::info!("open url: {url}");
-                    match open::that(&url) {
-                        Ok(()) => self.status = format!("opened {url}"),
-                        Err(e) => self.status = format!("open failed: {e}"),
-                    }
-                    return MouseClickOutcome::OpenedUrl;
+        if pressed
+            && mods.contains(self.url_mods())
+            && let Some(url) = self.url_at(col, row)
+        {
+            if crate::mouse::is_openable_url(&url) {
+                log::info!("open url: {url}");
+                match open::that(&url) {
+                    Ok(()) => self.status = format!("opened {url}"),
+                    Err(e) => self.status = format!("open failed: {e}"),
                 }
-                return MouseClickOutcome::Ignored;
+                return MouseClickOutcome::OpenedUrl;
             }
+            return MouseClickOutcome::Ignored;
+        }
         let Some((id, c, r)) = self.inner_at(col, row) else {
             return MouseClickOutcome::Ignored;
         };
@@ -4907,25 +5058,27 @@ impl App {
     /// else the focused pane's scrollback exactly as before. Returns whether
     /// the wheel was forwarded (false = scrolled back instead).
     pub fn mouse_wheel(&mut self, col: u16, row: u16, lines: i32, mods: Mods) -> bool {
-        if lines != 0 && self.config.mouse.enabled && self.mode() == Mode::Normal
-            && let Some((id, c, r)) = self.inner_at(col, row) {
-                let state = match self.ws().pane(id) {
-                    Some(pane) => pane.mouse_state(),
-                    None => return false,
-                };
-                if state.tracking {
-                    for _ in 0..lines.unsigned_abs() {
-                        let bytes =
-                            crate::mouse::encode_wheel(lines > 0, c, r, mods, state.encoding);
-                        if let Some(pane) = self.ws_mut().pane_mut(id) {
-                            pane.write(&bytes);
-                        } else {
-                            break;
-                        }
+        if lines != 0
+            && self.config.mouse.enabled
+            && self.mode() == Mode::Normal
+            && let Some((id, c, r)) = self.inner_at(col, row)
+        {
+            let state = match self.ws().pane(id) {
+                Some(pane) => pane.mouse_state(),
+                None => return false,
+            };
+            if state.tracking {
+                for _ in 0..lines.unsigned_abs() {
+                    let bytes = crate::mouse::encode_wheel(lines > 0, c, r, mods, state.encoding);
+                    if let Some(pane) = self.ws_mut().pane_mut(id) {
+                        pane.write(&bytes);
+                    } else {
+                        break;
                     }
-                    return true;
                 }
+                return true;
             }
+        }
         self.scroll_focused(lines);
         false
     }
@@ -4951,7 +5104,13 @@ impl App {
         };
         let editor = std::env::var("EDITOR")
             .or_else(|_| std::env::var("VISUAL"))
-            .unwrap_or_else(|_| if cfg!(windows) { "notepad".into() } else { "vi".into() });
+            .unwrap_or_else(|_| {
+                if cfg!(windows) {
+                    "notepad".into()
+                } else {
+                    "vi".into()
+                }
+            });
         let cmd = edit_invocation(&editor, &path);
         log::info!("editing config in pane: {cmd}");
         let ws = self.ws_mut();
@@ -5008,12 +5167,6 @@ impl App {
         }
         // `[window]` (backdrop, decorations, theme for rebuilds) is picked
         // up by the window host, which mirrors this config every frame.
-        self.config_mtime = self
-            .config
-            .source
-            .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
         // Reopen the command database if its path changed.
         let db_path = self.config.commands_db_path();
         if db_path != self.db_path {
@@ -5025,23 +5178,6 @@ impl App {
                     None
                 }
             };
-        }
-    }
-
-    /// Hot reload: if the config file changed on disk, reload it.
-    /// Polled every ~0.5s (a `stat` per frame would be wasteful).
-    pub fn hot_reload_check(&mut self) {
-        self.reload_tick = self.reload_tick.wrapping_add(1);
-        if !self.reload_tick.is_multiple_of(30) {
-            return;
-        }
-        let Some(path) = self.config.source.clone() else {
-            return;
-        };
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        if mtime.is_some() && mtime != self.config_mtime {
-            self.config_mtime = mtime;
-            self.reload_config();
         }
     }
 
@@ -5206,10 +5342,7 @@ impl App {
                 // At the top edge, scroll back into history instead of
                 // clamping: the snapshot refreshes and the cursor stays on
                 // row 0 over the newly revealed line.
-                let at_top = self
-                    .select
-                    .as_ref()
-                    .is_some_and(|s| s.at_top());
+                let at_top = self.select.as_ref().is_some_and(|s| s.at_top());
                 if at_top && self.select_scroll(1) {
                     return;
                 }
@@ -5220,10 +5353,7 @@ impl App {
             Key::Char('j') | Key::Down => {
                 // Symmetric: at the bottom edge, scroll forward toward the
                 // live screen.
-                let at_bottom = self
-                    .select
-                    .as_ref()
-                    .is_some_and(|s| s.at_bottom());
+                let at_bottom = self.select.as_ref().is_some_and(|s| s.at_bottom());
                 if at_bottom && self.select_scroll(-1) {
                     return;
                 }
@@ -5495,8 +5625,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("close");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         assert_eq!(app.ws().leaf_ids().len(), 1);
 
         // ctrl+s splits (default bindings), ctrl+w closes.
@@ -5538,7 +5676,16 @@ mod tests {
         let layout = unique_temp_path("close-off");
         let mut cfg = Config::default();
         cfg.fx.enabled = false;
-        let mut app = App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false).expect("app boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.handle_key(key(Key::Char('s'), Mods::CONTROL));
         assert_eq!(app.ws().leaf_ids().len(), 2);
         app.handle_key(key(Key::Char('w'), Mods::CONTROL));
@@ -5563,8 +5710,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("zoom-pane");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         // ctrl+shift+z is bound to ZoomPane by default.
         assert!(matches!(
             app.lookup_command(&key(Key::Char('Z'), Mods::CONTROL | Mods::SHIFT)),
@@ -5645,8 +5800,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("split-cwd");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let dir = std::env::temp_dir().join(format!(
             "termrs-split-cwd-{}-{}",
             std::process::id(),
@@ -5888,8 +6051,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("cursorcell");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let fid = app.ws().focused;
         app.ws_mut()
             .set_rects(&[(fid, ratatui::layout::Rect::new(0, 0, 20, 10))]);
@@ -5920,15 +6091,26 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("cursorselect");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let fid = app.ws().focused;
         app.ws_mut()
             .set_rects(&[(fid, ratatui::layout::Rect::new(0, 0, 20, 10))]);
         assert!(app.cursor_cell().is_some(), "cursor visible normally");
         app.toggle_select();
         assert!(app.select.is_some(), "select mode entered");
-        assert!(app.cursor_cell().is_none(), "GPU cursor hidden while selecting");
+        assert!(
+            app.cursor_cell().is_none(),
+            "GPU cursor hidden while selecting"
+        );
         app.toggle_select();
         assert!(app.cursor_cell().is_some(), "cursor back after leaving");
 
@@ -5949,8 +6131,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("complete");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let dir = std::env::temp_dir().join(format!("termrs-cwd-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("zed.png"), b"x").unwrap();
@@ -5985,8 +6175,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("exit");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let fid = app.ws().focused;
         app.ws_mut()
             .pane_mut(fid)
@@ -6019,8 +6217,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("idx");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.new_workspace();
         app.new_workspace();
         assert_eq!(app.workspaces[1].name, "ws-1");
@@ -6049,8 +6255,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("zoom");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         assert_eq!(app.font_size, 16);
         app.handle_key(key(Key::Char('+'), Mods::CONTROL));
         assert_eq!(app.take_zoom_request(), Some(17));
@@ -6173,7 +6387,8 @@ mod tests {
         let layout = dir.join("layout.toml");
 
         let cfg = Config::load(Some(cfg_path.as_path()));
-        let mut app = App::new(cfg, Some(layout), rt.handle(), &wake, None, None, false).expect("app boots");
+        let mut app =
+            App::new(cfg, Some(layout), rt.handle(), &wake, None, None, false).expect("app boots");
         let entry = FontEntry {
             name: "Fake".to_string(),
             path: fake_font.clone(),
@@ -6223,8 +6438,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("fontpreview");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let entry = FontEntry {
             name: real.name.clone(),
             path: real.path.clone(),
@@ -6255,10 +6478,12 @@ mod tests {
             app.poll_font_preview();
             if !app.font_preview_loading()
                 && let Some(((path, size), _, _)) = app.font_preview_meta()
-                    && path == real.path.to_string_lossy() && size == want_size {
-                        landed = true;
-                        break;
-                    }
+                && path == real.path.to_string_lossy()
+                && size == want_size
+            {
+                landed = true;
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert!(landed, "latest preview never landed");
@@ -6301,16 +6526,14 @@ mod tests {
         let layout = dir.join("layout.toml");
 
         let cfg = Config::load(Some(cfg_path.as_path()));
-        let mut app = App::new(cfg, Some(layout), rt.handle(), &wake, None, None, false).expect("app boots");
+        let mut app =
+            App::new(cfg, Some(layout), rt.handle(), &wake, None, None, false).expect("app boots");
         app.open_font_picker();
         assert_eq!(app.config.general.font_size, 16);
 
         // Tab -> size field.
         app.handle_key(key(Key::Tab, Mods::empty()));
-        assert_eq!(
-            app.font_picker.as_ref().unwrap().focus,
-            PickerFocus::Size
-        );
+        assert_eq!(app.font_picker.as_ref().unwrap().focus, PickerFocus::Size);
         // Up / j step the size; each queues a live zoom rebuild.
         app.handle_key(key(Key::Up, Mods::empty()));
         assert_eq!(app.font_picker.as_ref().unwrap().size, 17);
@@ -6372,17 +6595,27 @@ mod tests {
             send: "macro_probe_xyz".to_string(),
             enter: false,
         });
-        let mut app = App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false).expect("app boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         assert!(app.handle_key(key(Key::Char('m'), Mods::CONTROL)));
         let mut seen = false;
         for _ in 0..80 {
             app.poll_panes();
             let fid = app.ws().focused;
             if let Some(p) = app.ws().pane(fid)
-                && p.screen().contents().contains("macro_probe_xyz") {
-                    seen = true;
-                    break;
-                }
+                && p.screen().contents().contains("macro_probe_xyz")
+            {
+                seen = true;
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert!(seen, "macro text reached the pane");
@@ -6408,18 +6641,27 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("httpcmd");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.handle_http_command("echo probe--xx++yy");
         let mut seen = false;
         for _ in 0..80 {
             app.poll_panes();
             let fid = app.ws().focused;
             if let Some(p) = app.ws().pane(fid)
-                && p.screen().contents().contains("probe--xx++yy") {
-                    seen = true;
-                    break;
-                }
+                && p.screen().contents().contains("probe--xx++yy")
+            {
+                seen = true;
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert!(seen, "doubled chars survived /command injection");
@@ -6492,8 +6734,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("select-scroll");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let fid = app.ws().focused;
         // More lines than fit on screen, so scrollback history exists.
         let mut fill = String::new();
@@ -6548,8 +6798,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("menu");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         assert!(!app.menu_open);
         app.handle_key(key(Key::Char('o'), Mods::CONTROL));
         assert!(app.menu_open, "ctrl+o opens the menu");
@@ -6575,8 +6833,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("menucur");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.new_workspace(); // ws-1
         app.new_workspace(); // ws-2, current
         assert_eq!(app.current, 2);
@@ -6624,8 +6890,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("menubar");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.sync_menu();
         // Render the bar into a buffer and check the group labels appear.
         let area = ratatui::layout::Rect::new(0, 0, 60, 1);
@@ -6662,13 +6936,24 @@ mod tests {
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("menucmd");
         let (cfg, dbpath) = config_with_temp_db("menucmd");
-        let mut app =
-            App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false).expect("app boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.open_inbox();
         assert!(app.menu_open, "inbox opened");
 
         app.apply_menu_action(WsAction::SavedCommands);
-        assert!(app.command_picker_ref().is_some(), "picker opened from menu");
+        assert!(
+            app.command_picker_ref().is_some(),
+            "picker opened from menu"
+        );
         app.command_picker = None;
 
         app.apply_menu_action(WsAction::NewCommand);
@@ -6701,8 +6986,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("movews");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.new_workspace(); // ws-1
         app.new_workspace(); // ws-2
         let names = |a: &App| {
@@ -6775,8 +7068,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("movecur");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.new_workspace(); // ws-1
         app.new_workspace(); // ws-2
         app.new_workspace(); // ws-3 -> [main, ws-1, ws-2, ws-3]
@@ -6819,8 +7120,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("palette");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.handle_key(key(Key::Char('p'), Mods::CONTROL));
         assert!(app.palette.is_some(), "ctrl+p opens the palette");
         // First entry is "Split horizontally".
@@ -6902,8 +7211,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("palette-run");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.handle_key(key(Key::Char('p'), Mods::CONTROL));
         for c in "quit".chars() {
             app.handle_key(key(Key::Char(c), Mods::empty()));
@@ -6927,8 +7244,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("palette-savelayout");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         assert!(!layout.is_file(), "nothing written before the command");
         app.handle_key(key(Key::Char('p'), Mods::CONTROL)); // command palette
         for c in "save layout".chars() {
@@ -6961,7 +7286,16 @@ mod tests {
         let cfg_path = unique_temp_path("cfg");
         std::fs::write(&cfg_path, "[general]\nscrollback = 1234\n").unwrap();
         let cfg = Config::load(Some(&cfg_path));
-        let mut app = App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false).expect("boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("boots");
         assert_eq!(app.config.general.scrollback, 1234);
 
         // Valid change applies.
@@ -6974,7 +7308,11 @@ mod tests {
         std::fs::write(&cfg_path, "[general]\nscrollback = ???\n").unwrap();
         app.reload_config();
         assert_eq!(app.config.general.scrollback, 4321, "kept old config");
-        assert!(app.status.contains("config error"), "status: {}", app.status);
+        assert!(
+            app.status.contains("config error"),
+            "status: {}",
+            app.status
+        );
 
         for w in &mut app.workspaces {
             w.kill_all();
@@ -6993,8 +7331,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("select");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
 
         let mut mods = Mods::empty();
         mods.insert(Mods::CONTROL);
@@ -7044,8 +7390,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("mouse");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let fid = app.ws().focused;
         app.ws_mut()
             .set_rects(&[(fid, ratatui::layout::Rect::new(0, 0, 80, 24))]);
@@ -7059,9 +7413,7 @@ mod tests {
             .expect("pane")
             .feed_for_test(fill.as_bytes());
         // Full-area (5,5) -> inner grid (4,4).
-        let press = |app: &mut App| {
-            app.mouse_button(5, 5, MButton::Left, true, Mods::empty())
-        };
+        let press = |app: &mut App| app.mouse_button(5, 5, MButton::Left, true, Mods::empty());
 
         // No tracking: clicks are ignored here (caller still focuses).
         assert_eq!(press(&mut app), MouseClickOutcome::Ignored);
@@ -7069,12 +7421,7 @@ mod tests {
         assert!(!app.mouse_move(5, 5, Mods::empty(), true));
         // Wheel without tracking scrolls back instead (returns false).
         assert!(!app.mouse_wheel(5, 5, 3, Mods::empty()));
-        let sb = app
-            .ws()
-            .pane(fid)
-            .expect("pane")
-            .screen()
-            .scrollback();
+        let sb = app.ws().pane(fid).expect("pane").screen().scrollback();
         assert_eq!(sb, 3);
 
         // App enables tracking: presses forward, releases too (1000 covers
@@ -7092,12 +7439,7 @@ mod tests {
         // Wheel is forwarded now (returns true); writing to the pane
         // jumps back to the live screen, clearing the 3 above.
         assert!(app.mouse_wheel(5, 5, 3, Mods::empty()));
-        let sb2 = app
-            .ws()
-            .pane(fid)
-            .expect("pane")
-            .screen()
-            .scrollback();
+        let sb2 = app.ws().pane(fid).expect("pane").screen().scrollback();
         assert_eq!(sb2, 0, "write() returns to the live screen");
 
         // Any-motion mode reports free moves as well.
@@ -7145,8 +7487,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("mcpclick");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let fid = app.ws().focused;
         app.ws_mut()
             .set_rects(&[(fid, ratatui::layout::Rect::new(0, 1, 80, 24))]);
@@ -7174,25 +7524,13 @@ mod tests {
         }
 
         // Drag with a non-left button: press, motion along the line, release.
-        match app.mcp_mouse_drag(
-            fid,
-            (1, 1),
-            (5, 4),
-            crate::mouse::MouseButton::Right,
-            None,
-        ) {
+        match app.mcp_mouse_drag(fid, (1, 1), (5, 4), crate::mouse::MouseButton::Right, None) {
             McpReply::Text(t) => assert!(t.contains("dragged Right"), "drag: {t}"),
             _ => panic!("expected a drag report"),
         }
 
         // An out-of-grid drag end is rejected before any bytes go out.
-        match app.mcp_mouse_drag(
-            fid,
-            (1, 1),
-            (200, 4),
-            crate::mouse::MouseButton::Left,
-            None,
-        ) {
+        match app.mcp_mouse_drag(fid, (1, 1), (200, 4), crate::mouse::MouseButton::Left, None) {
             McpReply::Err(e) => assert!(e.contains("outside the pane grid"), "err: {e}"),
             _ => panic!("expected out-of-grid drag rejection"),
         }
@@ -7217,8 +7555,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("mousecoalesce");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let fid = app.ws().focused;
         app.ws_mut()
             .set_rects(&[(fid, ratatui::layout::Rect::new(0, 0, 80, 24))]);
@@ -7229,13 +7575,19 @@ mod tests {
             .feed_for_test(b"\x1b[?1002h\x1b[?1006h");
 
         // First drag report at a cell is sent; an immediate repeat is not.
-        assert!(app.mouse_move(5, 5, Mods::empty(), true), "first move reports");
+        assert!(
+            app.mouse_move(5, 5, Mods::empty(), true),
+            "first move reports"
+        );
         assert!(
             !app.mouse_move(5, 5, Mods::empty(), true),
             "same cell is coalesced"
         );
         // A different cell reports again.
-        assert!(app.mouse_move(6, 5, Mods::empty(), true), "new cell reports");
+        assert!(
+            app.mouse_move(6, 5, Mods::empty(), true),
+            "new cell reports"
+        );
         // Releasing and pressing again resets the cache, so the next move
         // at the very same cell reports.
         app.mouse_button(6, 5, MButton::Left, false, Mods::empty());
@@ -7263,8 +7615,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("mouseurl");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let fid = app.ws().focused;
         app.ws_mut()
             .set_rects(&[(fid, ratatui::layout::Rect::new(0, 0, 80, 24))]);
@@ -7275,10 +7635,7 @@ mod tests {
             .expect("pane")
             .feed_for_test(b"\x1b[Hhttps://example.com/x");
         // Full-area (1,1) is inner grid (0,0): the link starts there.
-        assert_eq!(
-            app.url_at(1, 1),
-            Some("https://example.com/x".to_string())
-        );
+        assert_eq!(app.url_at(1, 1), Some("https://example.com/x".to_string()));
         assert_eq!(app.url_at(10, 1), Some("https://example.com/x".to_string()));
         assert_eq!(app.url_at(1, 5), None);
         // Default url_mod is ctrl; alt also parses via config.
@@ -7307,8 +7664,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("keymap");
-        let app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let ctrl = |c: char| KeyPress {
             key: Key::Char(c),
             mods: Mods::CONTROL,
@@ -7351,8 +7716,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("mode");
-        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         assert_eq!(app.mode(), Mode::Normal);
         app.open_palette();
         assert_eq!(app.mode(), Mode::Palette);
@@ -7379,8 +7752,16 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("title");
-        let app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let app = App::new(
+            Config::default(),
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let title = app.window_title();
         assert!(title.starts_with("termrs - "), "title: {title}");
         assert!(title.contains("main"), "title: {title}");
@@ -7425,8 +7806,16 @@ mod tests {
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("cmdpick");
         let (cfg, dbpath) = config_with_temp_db("cmdpick");
-        let mut app =
-            App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false).expect("app boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.db
             .as_ref()
             .unwrap()
@@ -7437,7 +7826,11 @@ mod tests {
         assert!(app.command_picker_ref().is_some(), "ctrl+r opens picker");
         app.handle_key(key(Key::Enter, Mods::empty()));
         assert!(app.command_args.is_none());
-        assert!(app.status.starts_with("run: echo hi"), "status: {}", app.status);
+        assert!(
+            app.status.starts_with("run: echo hi"),
+            "status: {}",
+            app.status
+        );
         assert_eq!(app.db.as_ref().unwrap().all().unwrap()[0].uses, 1);
 
         for w in &mut app.workspaces {
@@ -7460,8 +7853,16 @@ mod tests {
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("cmdargs");
         let (cfg, dbpath) = config_with_temp_db("cmdargs");
-        let mut app =
-            App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false).expect("app boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.db
             .as_ref()
             .unwrap()
@@ -7500,8 +7901,16 @@ mod tests {
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("cmdsave");
         let (cfg, dbpath) = config_with_temp_db("cmdsave");
-        let mut app =
-            App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false).expect("app boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
 
         app.handle_key(key(Key::Char('r'), Mods::CONTROL | Mods::SHIFT));
         assert!(app.command_form_mut().is_some(), "ctrl+shift+r opens form");
@@ -7538,9 +7947,16 @@ mod tests {
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("cmdedit");
         let (cfg, dbpath) = config_with_temp_db("cmdedit");
-        let mut app =
-            App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false)
-                .expect("app boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         let id = app
             .db
             .as_ref()
@@ -7572,7 +7988,11 @@ mod tests {
         assert_eq!(row.comment, "recent commits");
         assert_eq!(row.tags, "git", "tags kept");
         assert_eq!(row.uses, 1, "use counter kept");
-        assert!(app.status.contains("updated command"), "status: {}", app.status);
+        assert!(
+            app.status.contains("updated command"),
+            "status: {}",
+            app.status
+        );
 
         for w in &mut app.workspaces {
             w.kill_all();
@@ -7594,10 +8014,21 @@ mod tests {
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("cmdetype");
         let (cfg, dbpath) = config_with_temp_db("cmdetype");
-        let mut app =
-            App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false)
-                .expect("app boots");
-        app.db.as_ref().unwrap().add("git log", "commits", "").unwrap();
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
+        app.db
+            .as_ref()
+            .unwrap()
+            .add("git log", "commits", "")
+            .unwrap();
 
         app.handle_key(key(Key::Char('r'), Mods::CONTROL));
         type_text(&mut app, "e");
@@ -7625,9 +8056,16 @@ mod tests {
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("cheatimport");
         let (cfg, dbpath) = config_with_temp_db("cheatimport");
-        let mut app =
-            App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false)
-                .expect("app boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.db
             .as_ref()
             .unwrap()
@@ -7651,24 +8089,45 @@ mod tests {
         app.cheat_rx = Some(rx);
         app.poll_cheat();
         assert!(app.cheat_rx.is_none(), "channel consumed");
-        assert_eq!(app.db.as_ref().unwrap().all().unwrap().len(), 1, "nothing saved yet");
+        assert_eq!(
+            app.db.as_ref().unwrap().all().unwrap().len(),
+            1,
+            "nothing saved yet"
+        );
         let picker = app.cheat_picker_ref().expect("review picker opens");
         assert_eq!(picker.results.len(), 1, "dupe filtered");
         assert_eq!(picker.checked_count(), 0, "starts unticked");
-        assert!(app.status.contains("already saved"), "status: {}", app.status);
+        assert!(
+            app.status.contains("already saved"),
+            "status: {}",
+            app.status
+        );
 
         // Empty Enter keeps it open; space ticks, Enter adds.
         app.handle_key(key(Key::Enter, Mods::empty()));
-        assert!(app.cheat_picker_ref().is_some(), "empty submit keeps picker");
+        assert!(
+            app.cheat_picker_ref().is_some(),
+            "empty submit keeps picker"
+        );
         app.handle_key(key(Key::Space, Mods::empty()));
         assert_eq!(app.cheat_picker_ref().expect("picker").checked_count(), 1);
         app.handle_key(key(Key::Enter, Mods::empty()));
         assert!(app.cheat_picker_ref().is_none(), "submit closes picker");
         let all = app.db.as_ref().unwrap().all().unwrap();
         assert_eq!(all.len(), 2);
-        assert!(all.iter().any(|c| c.tags == "cheat.sh:tar"), "tagged: {all:?}");
-        assert!(app.status.contains("added 1 commands"), "status: {}", app.status);
-        assert!(app.command_picker_ref().is_some(), "command picker opens after");
+        assert!(
+            all.iter().any(|c| c.tags == "cheat.sh:tar"),
+            "tagged: {all:?}"
+        );
+        assert!(
+            app.status.contains("added 1 commands"),
+            "status: {}",
+            app.status
+        );
+        assert!(
+            app.command_picker_ref().is_some(),
+            "command picker opens after"
+        );
 
         for w in &mut app.workspaces {
             w.kill_all();
@@ -7690,9 +8149,16 @@ mod tests {
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("cheatedit");
         let (cfg, dbpath) = config_with_temp_db("cheatedit");
-        let mut app =
-            App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false)
-                .expect("app boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.cheat_picker = Some(CheatPicker::new(
             "tar".into(),
             vec![
@@ -7728,14 +8194,21 @@ mod tests {
         assert_eq!(picker.items[0].entry.comment, "extract done");
         // Nothing reached the database.
         assert!(app.db.as_ref().unwrap().all().unwrap().is_empty());
-        assert!(app.status.contains("edited import row"), "status: {}", app.status);
+        assert!(
+            app.status.contains("edited import row"),
+            "status: {}",
+            app.status
+        );
 
         // Esc from the edit table returns to the import picker.
         app.handle_key(key(Key::Char('e'), Mods::CONTROL));
         assert!(app.command_form_mut().is_some());
         app.handle_key(key(Key::Esc, Mods::empty()));
         assert!(app.command_form_mut().is_none());
-        assert!(app.cheat_picker_ref().is_some(), "esc returns to import picker");
+        assert!(
+            app.cheat_picker_ref().is_some(),
+            "esc returns to import picker"
+        );
 
         for w in &mut app.workspaces {
             w.kill_all();
@@ -7756,14 +8229,27 @@ mod tests {
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let layout = unique_temp_path("cheatpick");
         let (cfg, dbpath) = config_with_temp_db("cheatpick");
-        let mut app =
-            App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false)
-                .expect("app boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
         app.cheat_picker = Some(CheatPicker::new(
             "tar".into(),
             vec![
-                crate::cheatsheet::CheatEntry { command: "tar -xvf {a}".into(), comment: String::new() },
-                crate::cheatsheet::CheatEntry { command: "tar -tzvf {a}".into(), comment: String::new() },
+                crate::cheatsheet::CheatEntry {
+                    command: "tar -xvf {a}".into(),
+                    comment: String::new(),
+                },
+                crate::cheatsheet::CheatEntry {
+                    command: "tar -tzvf {a}".into(),
+                    comment: String::new(),
+                },
             ],
         ));
         app.handle_key(key(Key::Char('a'), Mods::CONTROL));
@@ -7811,8 +8297,16 @@ mod tests {
         let layout = unique_temp_path("mcp");
         let mut cfg = Config::default();
         cfg.general.mcp_port = 0; // ephemeral: no clash with a real server
-        let mut app = App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false)
-            .expect("app boots");
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
 
         app.open_mcp_pane(None);
         let pane_id = app.ws().focused;

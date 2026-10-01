@@ -16,7 +16,9 @@ use ratatui::backend::Backend;
 use ratatui_wgpu::{Builder, Dimensions, Font, WgpuBackend};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, KeyEvent as WinitKeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, KeyEvent as WinitKeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
@@ -139,11 +141,7 @@ impl TermrsWindow {
     fn build_backend(&self, window: &Arc<Window>, font_size: u32) -> Result<Term, String> {
         let set = self.font_set.as_ref().expect("font loaded in init");
         let font = Font::new(set.primary).ok_or("font could not be parsed")?;
-        let fallbacks: Vec<Font> = set
-            .fallbacks
-            .iter()
-            .filter_map(|b| Font::new(b))
-            .collect();
+        let fallbacks: Vec<Font> = set.fallbacks.iter().filter_map(|b| Font::new(b)).collect();
 
         let size = window.inner_size();
         let width = NonZeroU32::new(size.width.max(1)).expect("non-zero width");
@@ -171,21 +169,21 @@ impl TermrsWindow {
                     bg: theme.bg,
                 },
             )
-                .with_regular_fonts([font])
-                .with_fonts(fallbacks)
-                .with_width_and_height(Dimensions { width, height })
-                .with_font_size_px(font_size.max(6))
-                .with_fg_color(ratatui::style::Color::Rgb(
-                    theme.fg[0],
-                    theme.fg[1],
-                    theme.fg[2],
-                ))
-                .with_bg_color(ratatui::style::Color::Rgb(
-                    theme.bg[0],
-                    theme.bg[1],
-                    theme.bg[2],
-                ))
-                .build_with_target(window.clone()),
+            .with_regular_fonts([font])
+            .with_fonts(fallbacks)
+            .with_width_and_height(Dimensions { width, height })
+            .with_font_size_px(font_size.max(6))
+            .with_fg_color(ratatui::style::Color::Rgb(
+                theme.fg[0],
+                theme.fg[1],
+                theme.fg[2],
+            ))
+            .with_bg_color(ratatui::style::Color::Rgb(
+                theme.bg[0],
+                theme.bg[1],
+                theme.bg[2],
+            ))
+            .build_with_target(window.clone()),
         )
         .map_err(|e| format!("wgpu backend: {e}"))?;
         Terminal::new(backend).map_err(|e| format!("terminal: {e}"))
@@ -209,7 +207,11 @@ impl TermrsWindow {
         } else {
             for (i, p) in resolved.iter().enumerate() {
                 let shown = p.to_string_lossy().into_owned();
-                log::info!("font fallback[{i}] {} (monospace: {})", p.display(), mono_flag(&shown));
+                log::info!(
+                    "font fallback[{i}] {} (monospace: {})",
+                    p.display(),
+                    mono_flag(&shown)
+                );
             }
         }
     }
@@ -301,9 +303,7 @@ impl TermrsWindow {
                         window.request_redraw();
                     }
                     Err(e2) => {
-                        self.error = Some(format!(
-                            "font {shown}: {e}; rollback also failed: {e2}"
-                        ));
+                        self.error = Some(format!("font {shown}: {e}; rollback also failed: {e2}"));
                     }
                 }
             }
@@ -392,21 +392,21 @@ impl TermrsWindow {
         });
 
         let ipc = crate::ipc::start_server();
-        let http_server = self.server_addr.clone().and_then(|addr| {
-            match crate::server::start_server(&addr) {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    log::warn!("http server failed to start: {e}");
-                    None
-                }
-            }
-        });
+        let http_server =
+            self.server_addr
+                .clone()
+                .and_then(|addr| match crate::server::start_server(&addr) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        log::warn!("http server failed to start: {e}");
+                        None
+                    }
+                });
         let server_mode = self.server_addr.is_some();
-        if server_mode
-            && let Ok(cwd) = std::env::current_dir() {
-                log::info!("server mode: using working directory {}", cwd.display());
-                let _ = std::env::set_current_dir(&cwd);
-            }
+        if server_mode && let Ok(cwd) = std::env::current_dir() {
+            log::info!("server mode: using working directory {}", cwd.display());
+            let _ = std::env::set_current_dir(&cwd);
+        }
         let mut app = App::new(
             self.config.clone(),
             self.layout_path.clone(),
@@ -429,11 +429,7 @@ impl TermrsWindow {
                 if let Some(press) = keys::from_winit(&raw.event, raw.mods) {
                     // Translated result, right before dispatch: the pair with
                     // the raw log above pinpoints any binding mismatch.
-                    log::debug!(
-                        "press key={:?} mods={:?}",
-                        press.key,
-                        press.mods
-                    );
+                    log::debug!("press key={:?} mods={:?}", press.key, press.mods);
                     if proxy.send_event(AppEvent::Key(press)).is_err() {
                         break;
                     }
@@ -458,10 +454,7 @@ impl TermrsWindow {
     /// backend's character metrics.
     fn cursor_cell(&mut self) -> Option<(u16, u16)> {
         let terminal = self.terminal.as_mut()?;
-        let ws = terminal
-            .backend_mut()
-            .window_size()
-            .ok()?;
+        let ws = terminal.backend_mut().window_size().ok()?;
         if ws.columns_rows.width == 0 || ws.columns_rows.height == 0 {
             return None;
         }
@@ -568,7 +561,12 @@ impl TermrsWindow {
         } else {
             match crate::image_view::decode(&path) {
                 Ok(img) => {
-                    log::info!("backdrop {} ({}x{}) opacity {opacity}", path, img.width, img.height);
+                    log::info!(
+                        "backdrop {} ({}x{}) opacity {opacity}",
+                        path,
+                        img.width,
+                        img.height
+                    );
                     processor.set_backdrop(img.data, img.width, img.height, opacity);
                 }
                 Err(e) => {
@@ -739,31 +737,27 @@ impl TermrsWindow {
             ch,
         ))
     }
-}
 
-impl ApplicationHandler<AppEvent> for TermrsWindow {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if let Err(e) = self.init(event_loop) {
-            log::error!("init failed: {e}");
-            self.error = Some(e);
-            event_loop.exit();
-            return;
-        }
+    fn resumed_selftest_block(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) -> std::ops::ControlFlow<()> {
         if self.selftest {
             // Optional: validate the GPU image pass against a real file.
             if let Ok(path) = std::env::var("TERMRS_SELFTEST_IMAGE")
-                && let Some(app) = self.app.as_mut() {
-                    match crate::image_view::ImageView::open(&path) {
-                        Ok(img) => {
-                            println!(
-                                "termrs: selftest image {} ({}x{})",
-                                path, img.dims.0, img.dims.1
-                            );
-                            app.set_image_for_test(img);
-                        }
-                        Err(e) => eprintln!("termrs: selftest image failed: {e}"),
+                && let Some(app) = self.app.as_mut()
+            {
+                match crate::image_view::ImageView::open(&path) {
+                    Ok(img) => {
+                        println!(
+                            "termrs: selftest image {} ({}x{})",
+                            path, img.dims.0, img.dims.1
+                        );
+                        app.set_image_for_test(img);
                     }
+                    Err(e) => eprintln!("termrs: selftest image failed: {e}"),
                 }
+            }
             // Optional: exercise a live backend rebuild (zoom, then font) to
             // diagnose rebuild hangs/crashes without clicking through the UI.
             if std::env::var("TERMRS_SELFTEST_REBUILD").is_ok() {
@@ -796,7 +790,10 @@ impl ApplicationHandler<AppEvent> for TermrsWindow {
                     "termrs: selftest ok ({}x{} cells, {} panes, font {}px{})",
                     size.width,
                     size.height,
-                    self.app.as_ref().map(|a| a.ws().leaf_ids().len()).unwrap_or(0),
+                    self.app
+                        .as_ref()
+                        .map(|a| a.ws().leaf_ids().len())
+                        .unwrap_or(0),
                     self.config.general.font_size.max(6),
                     if self.config.general.font.trim().is_empty() {
                         String::from(", auto font")
@@ -810,6 +807,21 @@ impl ApplicationHandler<AppEvent> for TermrsWindow {
                 }
             }
             event_loop.exit();
+            return std::ops::ControlFlow::Break(());
+        }
+        std::ops::ControlFlow::Continue(())
+    }
+}
+
+impl ApplicationHandler<AppEvent> for TermrsWindow {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(e) = self.init(event_loop) {
+            log::error!("init failed: {e}");
+            self.error = Some(e);
+            event_loop.exit();
+            return;
+        }
+        if let std::ops::ControlFlow::Break(_) = self.resumed_selftest_block(event_loop) {
             return;
         }
         if let Some(w) = &self.window {
@@ -818,12 +830,7 @@ impl ApplicationHandler<AppEvent> for TermrsWindow {
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME));
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -833,9 +840,10 @@ impl ApplicationHandler<AppEvent> for TermrsWindow {
                 // Forward motion while a tracked app wants it; cheap no-op
                 // otherwise (no redraw: motion alone changes nothing visual).
                 if let Some((col, row)) = self.cursor_cell()
-                    && let Some(app) = self.app.as_mut() {
-                        app.mouse_move(col, row, self.mods, self.left_held);
-                    }
+                    && let Some(app) = self.app.as_mut()
+                {
+                    app.mouse_move(col, row, self.mods, self.left_held);
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
@@ -950,11 +958,7 @@ impl ApplicationHandler<AppEvent> for TermrsWindow {
                         app.handle_key(press);
                         let zoom = app.take_zoom_request();
                         let font = app.take_font_request().map(|p| {
-                            (
-                                p,
-                                app.font_size(),
-                                app.config.general.font_fallback.clone(),
-                            )
+                            (p, app.font_size(), app.config.general.font_fallback.clone())
                         });
                         (zoom, font)
                     }
@@ -985,12 +989,22 @@ impl ApplicationHandler<AppEvent> for TermrsWindow {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Only redraw when there is something new to show: a running
+        // animation, pane output or an async result (both reported by
+        // `poll_panes`), or a hot-reloaded config. The 16ms timer below still
+        // runs so those sources keep getting polled, but an idle app no longer
+        // rebuilds the whole vt100 -> ratatui -> wgpu pipeline every frame.
+        let mut redraw = false;
         if let Some(app) = self.app.as_mut() {
-            app.poll_panes();
+            // Catch an animation that finishes during this poll: the frame
+            // right after it completes must still be drawn.
+            redraw |= app.is_animating();
+            redraw |= app.poll_panes();
             if app.should_quit {
                 event_loop.exit();
                 return;
             }
+            redraw |= app.is_animating();
         }
         // Hot reload replaces `app.config` in place; mirror it into the
         // window host's copy so `[window]` (backdrop, decorations, theme for
@@ -1000,15 +1014,17 @@ impl ApplicationHandler<AppEvent> for TermrsWindow {
             .as_ref()
             .is_some_and(|app| app.config != self.config);
         if stale {
+            redraw = true;
             let fresh = self
                 .app
                 .as_ref()
                 .map(|app| app.config.clone())
                 .expect("app present");
             if fresh.window.decorations != self.config.window.decorations
-                && let Some(w) = &self.window {
-                    w.set_decorations(fresh.window.decorations);
-                }
+                && let Some(w) = &self.window
+            {
+                w.set_decorations(fresh.window.decorations);
+            }
             if fresh.window.transparent != self.config.window.transparent {
                 log::warn!("transparent changed; restart termrs to apply");
                 if let Some(app) = self.app.as_mut() {
@@ -1019,22 +1035,18 @@ impl ApplicationHandler<AppEvent> for TermrsWindow {
         }
         // Hot reload may have queued a font change without any keypress.
         let font_req = self.app.as_mut().and_then(|app| {
-            app.take_font_request().map(|p| {
-                (
-                    p,
-                    app.font_size(),
-                    app.config.general.font_fallback.clone(),
-                )
-            })
+            app.take_font_request()
+                .map(|p| (p, app.font_size(), app.config.general.font_fallback.clone()))
         });
         if let Some((path, size, fallbacks)) = font_req {
             self.apply_font(&path, size, &fallbacks);
+            redraw = true;
         }
         if self.error.is_some() {
             event_loop.exit();
             return;
         }
-        if let Some(w) = &self.window {
+        if redraw && let Some(w) = &self.window {
             w.request_redraw();
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME));
@@ -1060,7 +1072,11 @@ fn mods_from(m: ModifiersState) -> Mods {
 }
 
 /// Run the native window until it closes. Returns the first fatal error, if any.
-pub fn run(config: Config, layout_path: Option<std::path::PathBuf>, server_addr: Option<&str>) -> Result<(), String> {
+pub fn run(
+    config: Config,
+    layout_path: Option<std::path::PathBuf>,
+    server_addr: Option<&str>,
+) -> Result<(), String> {
     run_inner(config, layout_path, false, server_addr)
 }
 
