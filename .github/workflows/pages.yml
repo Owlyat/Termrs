@@ -6,6 +6,8 @@ on:
     branches: [master, main]
     paths:
       - "crates/termrs-share-web/**"
+      - "crates/termrs-share-proto/**"
+      - "crates/termrs/src/share.rs"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
