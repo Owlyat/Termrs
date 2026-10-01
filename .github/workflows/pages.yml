@@ -1,3 +1,4 @@
+# Builds crates/termrs-share-web and publishes its web/ folder to GitHub Pages.
 name: Deploy share page to GitHub Pages
 
 on:
