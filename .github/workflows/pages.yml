@@ -38,6 +38,21 @@ jobs:
       - name: Build the browser client and page
         run: bash crates/termrs-share-web/build.sh
 
+      # GitHub Pages caches assets for ~10 min; version the entry files with
+      # the commit so browsers pick up new builds without a hard refresh.
+      - name: Cache-bust the page assets
+        run: |
+          stamp="${GITHUB_SHA::8}"
+          sed -i \
+            -e "s|\./main\.js|./main.js?v=${stamp}|g" \
+            -e "s|\./style\.css|./style.css?v=${stamp}|g" \
+            -e "s|\./vendor/xterm\.css|./vendor/xterm.css?v=${stamp}|g" \
+            -e "s|\./vendor/xterm\.js|./vendor/xterm.js?v=${stamp}|g" \
+            crates/termrs-share-web/web/index.html
+          sed -i \
+            -e "s|\./wasm/termrs_share_web\.js|./wasm/termrs_share_web.js?v=${stamp}|g" \
+            crates/termrs-share-web/web/main.js
+
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
