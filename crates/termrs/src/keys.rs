@@ -8,6 +8,7 @@ use std::ops::{BitOr, BitOrAssign};
 use winit::event::ElementState;
 use winit::event::KeyEvent as WinitKeyEvent;
 use winit::keyboard::{Key as WinitKey, NamedKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 /// Modifier flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -452,6 +453,19 @@ fn is_os_shortcut(key: &WinitKey, mods: Mods) -> bool {
     matches!(key, WinitKey::Named(NamedKey::Tab)) && mods.contains(Mods::ALT)
 }
 
+/// Choose the key to classify. Windows reports Alt/AltGr+letter combos as
+/// `Unidentified` on layouts with no mapping for that Alt level (e.g.
+/// Ctrl+Alt+Shift+S on an AltGr layout). The modifier-free layout character is
+/// still available in `without_modifiers`, so use it as a fallback instead of
+/// dropping the press; a resolvable logical key (including a real AltGr
+/// character) always wins.
+fn resolve_logical(logical: &WinitKey, without_modifiers: &WinitKey) -> WinitKey {
+    match logical {
+        WinitKey::Unidentified(_) => without_modifiers.clone(),
+        other => other.clone(),
+    }
+}
+
 /// Convert a winit key event into a [`KeyPress`], using `mods` tracked from
 /// `WindowEvent::ModifiersChanged`.
 pub fn from_winit(ev: &WinitKeyEvent, mods: Mods) -> Option<KeyPress> {
@@ -459,7 +473,8 @@ pub fn from_winit(ev: &WinitKeyEvent, mods: Mods) -> Option<KeyPress> {
         return None;
     }
     let mut mods = mods;
-    let key = match &ev.logical_key {
+    let logical = resolve_logical(&ev.logical_key, &ev.key_without_modifiers());
+    let key = match &logical {
         WinitKey::Named(named) => match named {
             NamedKey::Enter => Key::Enter,
             NamedKey::Escape => Key::Esc,
@@ -635,6 +650,29 @@ mod tests {
         assert!(matches(&press(Key::Char('s'), both), "ctrl+alt+s"));
         // But alt-only must not satisfy a plain ctrl binding.
         assert!(!matches(&press(Key::Char('s'), only_alt), "ctrl+s"));
+    }
+
+    /// Ctrl+Alt+Shift+<letter> on an AltGr layout arrives with an
+    /// `Unidentified` logical key; the modifier-free fallback must resolve it
+    /// so the binding is not dropped.
+    #[test]
+    fn altgr_unidentified_uses_modifier_free_key() {
+        use winit::keyboard::NativeKey;
+
+        let unidentified = WinitKey::Unidentified(NativeKey::Unidentified);
+        let base = WinitKey::Character("s".into());
+        assert_eq!(resolve_logical(&unidentified, &base), base);
+
+        // A resolvable logical key is kept (real AltGr characters survive).
+        let euro = WinitKey::Character("\u{20ac}".into());
+        assert_eq!(resolve_logical(&euro, &base), euro);
+
+        // The resolved Char('s') plus control/shift/alt matches the binding.
+        let mut mods = Mods::empty();
+        mods.insert(Mods::CONTROL);
+        mods.insert(Mods::SHIFT);
+        mods.insert(Mods::ALT);
+        assert!(matches(&press(Key::Char('s'), mods), "ctrl+shift+alt+s"));
     }
 
     #[test]

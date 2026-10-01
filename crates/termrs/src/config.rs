@@ -433,7 +433,10 @@ where
 }
 
 fn k_split_h() -> Vec<String> {
-    vec!["ctrl+s".into()]
+    // `ctrl+shift+alt+s` is an explicit alternate: on AltGr layouts Ctrl+Alt
+    // is the AltGr level, and Shift is ignored for character keys, so plain
+    // `ctrl+s` already answers to Ctrl+Shift+S.
+    vec!["ctrl+s".into(), "ctrl+shift+alt+s".into()]
 }
 fn k_split_v() -> Vec<String> {
     vec!["ctrl+v".into()]
