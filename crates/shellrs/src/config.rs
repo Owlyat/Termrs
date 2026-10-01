@@ -24,6 +24,10 @@ pub struct General {
     /// symbols, emoji). Empty = auto-detect one.
     #[serde(default)]
     pub font_fallback: Vec<String>,
+    /// TCP port for a pane's MCP server. `0` = pick a free port each time;
+    /// set a fixed value so an MCP client (e.g. opencode) can hardcode the URL.
+    #[serde(default = "default_mcp_port")]
+    pub mcp_port: u16,
 }
 
 fn default_scrollback() -> usize {
@@ -34,6 +38,10 @@ fn default_font_size() -> u32 {
     16
 }
 
+fn default_mcp_port() -> u16 {
+    7331
+}
+
 impl Default for General {
     fn default() -> Self {
         Self {
@@ -42,6 +50,7 @@ impl Default for General {
             font: String::new(),
             font_size: default_font_size(),
             font_fallback: Vec::new(),
+            mcp_port: default_mcp_port(),
         }
     }
 }

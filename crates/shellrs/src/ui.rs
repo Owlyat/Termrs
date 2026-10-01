@@ -108,6 +108,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         } else {
             title
         };
+        // Pane-scoped MCP server status (see `crate::mcp`) sits at the top.
+        let title = match &pane.mcp_status {
+            Some(s) => format!("{s}  {title}"),
+            None => title,
+        };
         let accent = theme
             .accent
             .map(|[r, g, b]| Color::Rgb(r, g, b))

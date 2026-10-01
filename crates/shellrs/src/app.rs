@@ -148,6 +148,9 @@ pub enum Command {
     SplitHorizontal,
     SplitVertical,
     ClosePane,
+    OpenMcpSplitH,
+    OpenMcpSplitV,
+    OpenMcpHere,
     ZoomPane,
     FocusNext,
     FocusPrev,
@@ -191,6 +194,9 @@ impl Command {
         (Command::SplitHorizontal, "Split horizontally"),
         (Command::SplitVertical, "Split vertically"),
         (Command::ClosePane, "Close pane"),
+        (Command::OpenMcpSplitH, "Open MCP server splith"),
+        (Command::OpenMcpSplitV, "Open MCP server splitv"),
+        (Command::OpenMcpHere, "Open MCP server in current pane"),
         (Command::ZoomPane, "Zoom pane (maximize)"),
         (Command::FocusNext, "Focus next pane"),
         (Command::FocusPrev, "Focus previous pane"),
@@ -1646,6 +1652,13 @@ pub struct App {
     http_cmd_rx: Option<crossbeam_channel::Receiver<crate::server::ServerCommand>>,
     http_status_tx: Option<crossbeam_channel::Sender<String>>,
     http_screenshot_tx: Option<crossbeam_channel::Sender<Vec<u8>>>,
+    /// Pane-scoped MCP servers, keyed by pane id (see `crate::mcp`).
+    /// A pane's server is stopped when the pane disappears.
+    mcp_servers: std::collections::HashMap<usize, crate::mcp::PaneMcp>,
+    /// Tool calls from MCP servers land here; the UI thread answers them in
+    /// [`App::poll_mcp`].
+    mcp_query_tx: crossbeam_channel::Sender<crate::mcp::McpQuery>,
+    mcp_query_rx: Option<crossbeam_channel::Receiver<crate::mcp::McpQuery>>,
 }
 
 impl App {
@@ -1701,10 +1714,10 @@ impl App {
                 None
             }
         };
+        let (mcp_query_tx, mcp_query_rx) = crossbeam_channel::unbounded();
         let mut app = Self {
             config,
-            braille: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            workspaces,
+            braille: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),            workspaces,
             current: 0,
             prompt: None,
             menu: MenuState::new(Vec::new()),
@@ -1753,6 +1766,9 @@ impl App {
             http_cmd_rx: http_server.as_ref().map(|s| s.cmd_rx.clone()),
             http_status_tx: http_server.as_ref().map(|s| s.status_tx.clone()),
             http_screenshot_tx: http_server.map(|s| s.screenshot_tx),
+            mcp_servers: std::collections::HashMap::new(),
+            mcp_query_tx,
+            mcp_query_rx: Some(mcp_query_rx),
         };
         app.ws_mut().mark_seen();
         // Baseline mtime so hot-reload only fires on later changes.
@@ -2036,6 +2052,7 @@ impl App {
         self.poll_cwd_reply();
         self.poll_ipc();
         self.poll_http();
+        self.poll_mcp();
         self.hot_reload_check();
     }
 
@@ -2119,27 +2136,39 @@ impl App {
             kind: KeyKind::Press,
         };
         self.handle_key(press);
+        // Real keyboards always produce down/up pairs. Follow the
+        // synthetic press with its release: in win32-input-mode a key
+        // left logically down corrupts the next identical key-down
+        // (see handle_http_command), and releases are dropped on the
+        // legacy VT path, so this is a no-op everywhere else.
+        let release = KeyPress {
+            key: k,
+            mods,
+            text: None,
+            kind: KeyKind::Release,
+        };
+        self.handle_key(release);
     }
 
-    /// Handle a command string from the HTTP server: type each char then press Enter.
+    /// Handle a command string from the HTTP server: inject it as literal
+    /// input bytes plus Enter, in a single write.
+    ///
+    /// A previous implementation synthesized one key-press event per
+    /// character. In win32-input-mode panes those become a microsecond
+    /// burst of key-down records with no key-up in between, and ConPTY
+    /// coalesces back-to-back identical key-downs, silently dropping
+    /// doubled characters (`a--b` arrived as `a-b`, `C++` as `C+`).
+    /// A single raw write takes the same path as pastes and macros and
+    /// preserves every byte.
     fn handle_http_command(&mut self, cmd: &str) {
-        use crate::keys::{Key, KeyKind, KeyPress};
-        for ch in cmd.chars() {
-            let press = KeyPress {
-                key: Key::Char(ch),
-                mods: crate::keys::Mods::empty(),
-                text: None,
-                kind: KeyKind::Press,
-            };
-            self.handle_key(press);
-        }
-        let press = KeyPress {
-            key: Key::Enter,
-            mods: crate::keys::Mods::empty(),
-            text: None,
-            kind: KeyKind::Press,
+        let ws = self.ws_mut();
+        let Some(p) = ws.pane_mut(ws.focused) else {
+            return;
         };
-        self.handle_key(press);
+        let mut buf = Vec::with_capacity(cmd.len() + 1);
+        buf.extend_from_slice(cmd.as_bytes());
+        buf.push(b'\r');
+        p.write(&buf);
     }
 
     /// Get the terminal text content of the focused pane.
@@ -2170,8 +2199,12 @@ impl App {
 
     /// Get a PNG screenshot of the terminal.
     fn get_terminal_screenshot(&self) -> Vec<u8> {
-        let ws = self.ws();
-        let pane = match ws.pane(ws.focused) {
+        self.screenshot_pane(self.ws().focused)
+    }
+
+    /// PNG of any pane's current screen (used by the HTTP server and MCP).
+    fn screenshot_pane(&self, pane_id: usize) -> Vec<u8> {
+        let pane = match self.find_pane(pane_id) {
             Some(p) => p,
             None => return Vec::new(),
         };
@@ -2205,6 +2238,297 @@ impl App {
         let mut buf = Vec::new();
         let _ = img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png);
         buf
+    }
+
+    /// Find a pane by id in any workspace (MCP servers target a fixed pane,
+    /// which need not be the focused one).
+    fn find_pane(&self, id: usize) -> Option<&crate::pty::Pane> {
+        self.workspaces.iter().find_map(|w| w.pane(id))
+    }
+
+    fn find_pane_mut(&mut self, id: usize) -> Option<&mut crate::pty::Pane> {
+        self.workspaces
+            .iter_mut()
+            .find(|w| w.leaf_ids().contains(&id))
+            .and_then(|w| w.pane_mut(id))
+    }
+
+    /// Attach a pane-scoped MCP server to a pane.
+    ///
+    /// `split` chooses where the pane comes from: `Some(dir)` splits the
+    /// focused pane in that direction and uses the new one; `None` reuses the
+    /// focused pane as-is. Re-running on a pane that already hosts a server
+    /// replaces it (the old server is stopped).
+    fn open_mcp_pane(&mut self, split: Option<SplitDir>) {
+        let pane_id = match split {
+            Some(dir) => {
+                let shell = self.config.general.shell.clone();
+                let sb = self.config.general.scrollback;
+                let rt = self.rt.clone();
+                match self.ws_mut().split(dir, &shell, sb, &rt) {
+                    Ok(id) => {
+                        self.queue_fx(id, FxKind::Fresh);
+                        id
+                    }
+                    Err(e) => {
+                        self.status = format!("MCP pane failed: {e}");
+                        return;
+                    }
+                }
+            }
+            None => self.ws().focused,
+        };
+        self.attach_mcp(pane_id);
+    }
+
+    /// Start (or restart) the MCP server bound to `pane_id`.
+    fn attach_mcp(&mut self, pane_id: usize) {
+        if let Some(mut old) = self.mcp_servers.remove(&pane_id) {
+            old.stop();
+        }
+        let rt = self.rt.clone();
+        let port = self.config.general.mcp_port;
+        match crate::mcp::start_pane_mcp(&rt, self.mcp_query_tx.clone(), pane_id, port) {
+            Ok(server) => {
+                let port = server.port;
+                if let Some(p) = self.find_pane_mut(pane_id) {
+                    p.mcp_status = Some(server.shared.status());
+                }
+                self.mcp_servers.insert(pane_id, server);
+                self.status = format!("MCP pane {pane_id}: http://127.0.0.1:{port}/mcp");
+                log::info!("MCP server for pane {pane_id} listening on 127.0.0.1:{port}");
+            }
+            Err(e) => {
+                self.status = format!("MCP server failed: {e}");
+            }
+        }
+    }
+
+    /// Answer pending MCP tool calls, then stop servers whose pane is gone.
+    fn poll_mcp(&mut self) {
+        let queries: Vec<crate::mcp::McpQuery> = match &self.mcp_query_rx {
+            Some(rx) => rx.try_iter().collect(),
+            None => Vec::new(),
+        };
+        for q in queries {
+            let pane_id = q.pane_id;
+            let reply = self.mcp_handle_query(pane_id, q.kind);
+            let _ = q.reply.send(reply);
+        }
+        self.mcp_reconcile();
+    }
+
+    fn mcp_handle_query(
+        &mut self,
+        pane_id: usize,
+        kind: crate::mcp::McpQueryKind,
+    ) -> crate::mcp::McpReply {
+        use crate::mcp::{McpQueryKind as K, McpReply as R};
+        match kind {
+            K::Run(command) => {
+                let Some(p) = self.find_pane_mut(pane_id) else {
+                    return R::Err(format!("pane {pane_id} is gone"));
+                };
+                let mut bytes = command.into_bytes();
+                bytes.push(b'\r');
+                p.write(&bytes);
+                R::Ok
+            }
+            K::Key { key, modifier } => {
+                self.mcp_press_key(pane_id, &key, modifier.as_deref());
+                R::Ok
+            }
+            K::Mouse {
+                col,
+                row,
+                button,
+                modifier,
+            } => self.mcp_mouse_click(pane_id, col, row, button, modifier.as_deref()),
+            K::Interrupt => match self.find_pane_mut(pane_id) {
+                Some(p) => {
+                    p.interrupt();
+                    R::Ok
+                }
+                None => R::Err(format!("pane {pane_id} is gone")),
+            },
+            K::Screen => match self.find_pane(pane_id) {
+                Some(p) => R::Text(p.grid_lines().join("\n")),
+                None => R::Err(format!("pane {pane_id} is gone")),
+            },
+            K::Screenshot => {
+                let png = self.screenshot_pane(pane_id);
+                if png.is_empty() {
+                    R::Err(format!("pane {pane_id} has no image"))
+                } else {
+                    R::Png(png)
+                }
+            }
+            K::Info => match self.mcp_pane_info(pane_id) {
+                Ok(json) => R::Text(json),
+                Err(e) => R::Err(e),
+            },
+        }
+    }
+
+    /// Parse an MCP modifier string ("Ctrl"/"Alt"/"Shift") into key modifiers.
+    fn mcp_mods(modifier: Option<&str>) -> Mods {
+        let mut mods = Mods::empty();
+        if let Some(m) = modifier {
+            if m.contains("Ctrl") {
+                mods.insert(Mods::CONTROL);
+            }
+            if m.contains("Alt") {
+                mods.insert(Mods::ALT);
+            }
+            if m.contains("Shift") {
+                mods.insert(Mods::SHIFT);
+            }
+        }
+        mods
+    }
+
+    /// Emulate a mouse click at zero-based cell `(col, row)` inside the pane's
+    /// text grid. [`App::mouse_button`] wants full-window coordinates, so
+    /// translate through the pane's cached draw rect (the border insets the
+    /// grid by one cell), then press and release the button. Reports whether
+    /// the pane actually forwarded the click (its app must track the mouse).
+    fn mcp_mouse_click(
+        &mut self,
+        pane_id: usize,
+        col: u16,
+        row: u16,
+        button: crate::mouse::MouseButton,
+        modifier: Option<&str>,
+    ) -> crate::mcp::McpReply {
+        use crate::mcp::McpReply as R;
+        let Some(ws_idx) = self.workspaces.iter().position(|w| w.pane(pane_id).is_some()) else {
+            return R::Err(format!("pane {pane_id} is gone"));
+        };
+        // `mouse_button` reads the current workspace, so make sure the pane's
+        // workspace is the active one before hit-testing.
+        if ws_idx != self.current {
+            self.switch_to(ws_idx);
+        }
+        let Some(rect) = self.ws().pane_rect(pane_id) else {
+            return R::Err(format!("pane {pane_id} is not laid out yet"));
+        };
+        // Panes draw a one-cell border, so the inner grid starts at +1.
+        let (inner_w, inner_h) = (rect.width.saturating_sub(2), rect.height.saturating_sub(2));
+        if col >= inner_w || row >= inner_h {
+            return R::Err(format!(
+                "({col}, {row}) is outside the pane grid ({inner_w}x{inner_h})"
+            ));
+        }
+        let (full_col, full_row) = (rect.x + 1 + col, rect.y + 1 + row);
+        let mods = Self::mcp_mods(modifier);
+        let pressed = self.mouse_button(full_col, full_row, button, true, mods);
+        let released = self.mouse_button(full_col, full_row, button, false, mods);
+        if button == crate::mouse::MouseButton::Left {
+            self.focus_pane_at(full_col, full_row);
+        }
+        let forwarded = |o: MouseClickOutcome| {
+            matches!(
+                o,
+                MouseClickOutcome::Forwarded | MouseClickOutcome::OpenedUrl
+            )
+        };
+        if forwarded(pressed) || forwarded(released) {
+            R::Text(format!("clicked {button:?} at ({col}, {row})"))
+        } else {
+            R::Err(format!(
+                "pane {pane_id} did not accept the click (its app must enable mouse tracking)"
+            ))
+        }
+    }
+
+    /// Press a named key in a specific pane (mirrors the HTTP `/key` path).
+    fn mcp_press_key(&mut self, pane_id: usize, key: &str, modifier: Option<&str>) {
+        use crate::keys::{Key, KeyKind, KeyPress};
+        let mods = Self::mcp_mods(modifier);
+        let k = match key {
+            "Enter" => Key::Enter,
+            "Escape" => Key::Esc,
+            "Backspace" => Key::Backspace,
+            "Tab" => Key::Tab,
+            "Up" => Key::Up,
+            "Down" => Key::Down,
+            "Left" => Key::Left,
+            "Right" => Key::Right,
+            "Home" => Key::Home,
+            "End" => Key::End,
+            "PageUp" => Key::PageUp,
+            "PageDown" => Key::PageDown,
+            "Delete" => Key::Delete,
+            "Insert" => Key::Insert,
+            "F1" => Key::F(1),
+            "F2" => Key::F(2),
+            "F3" => Key::F(3),
+            "F4" => Key::F(4),
+            "F5" => Key::F(5),
+            "F6" => Key::F(6),
+            "F7" => Key::F(7),
+            "F8" => Key::F(8),
+            "F9" => Key::F(9),
+            "F10" => Key::F(10),
+            "F11" => Key::F(11),
+            "F12" => Key::F(12),
+            other if other.chars().count() == 1 => {
+                Key::Char(other.chars().next().expect("one char"))
+            }
+            _ => return,
+        };
+        let Some(p) = self.find_pane_mut(pane_id) else {
+            return;
+        };
+        for kind in [KeyKind::Press, KeyKind::Release] {
+            p.write_key(&KeyPress {
+                key: k,
+                mods,
+                text: None,
+                kind,
+            });
+        }
+    }
+
+    /// JSON description of a pane for the MCP `shellrs_pane_info` tool.
+    fn mcp_pane_info(&self, pane_id: usize) -> Result<String, String> {
+        let pane = self.find_pane(pane_id).ok_or_else(|| format!("pane {pane_id} is gone"))?;
+        let workspace = self
+            .workspaces
+            .iter()
+            .position(|w| w.pane(pane_id).is_some())
+            .unwrap_or(0);
+        Ok(serde_json::json!({
+            "pane_id": pane.id,
+            "workspace": workspace,
+            "title": pane.title,
+            "cwd": pane.cwd().to_string_lossy(),
+            "dead": pane.dead,
+        })
+        .to_string())
+    }
+
+    /// Stop MCP servers whose pane was closed; refresh the rest's status line.
+    fn mcp_reconcile(&mut self) {
+        let ids: Vec<usize> = self.mcp_servers.keys().copied().collect();
+        for id in ids {
+            if self.find_pane(id).is_none()
+                && let Some(mut server) = self.mcp_servers.remove(&id)
+            {
+                server.stop();
+                log::info!("MCP server for pane {id} stopped (pane closed)");
+            }
+        }
+        let statuses: Vec<(usize, String)> = self
+            .mcp_servers
+            .iter()
+            .map(|(id, server)| (*id, server.shared.status()))
+            .collect();
+        for (id, text) in statuses {
+            if let Some(p) = self.find_pane_mut(id) {
+                p.mcp_status = Some(text);
+            }
+        }
     }
 
     /// Handle pending IPC commands from external CLI clients.
@@ -3889,6 +4213,9 @@ impl App {
             Command::SplitHorizontal => self.split(SplitDir::Horizontal),
             Command::SplitVertical => self.split(SplitDir::Vertical),
             Command::ClosePane => self.close_focused(),
+            Command::OpenMcpSplitH => self.open_mcp_pane(Some(SplitDir::Horizontal)),
+            Command::OpenMcpSplitV => self.open_mcp_pane(Some(SplitDir::Vertical)),
+            Command::OpenMcpHere => self.open_mcp_pane(None),
             Command::ZoomPane => self.zoom_pane(),
             Command::FocusNext => self.cycle(1),
             Command::FocusPrev => self.cycle(-1),
@@ -5814,6 +6141,43 @@ mod tests {
         rt.shutdown_background();
     }
 
+    /// POST /command text with doubled characters reaches the pane byte-
+    /// intact. Regression test: per-character key events arrived as a
+    /// microsecond burst of key-down records with no key-up in between,
+    /// and ConPTY coalesced back-to-back identical key-downs (`a--b`
+    /// arrived as `a-b`). Both the echoed line and the command output
+    /// must contain the marker verbatim.
+    #[test]
+    fn http_command_preserves_doubled_chars() {
+        let _guard = crate::pty::lock_pty_tests();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (wake, _rx) = crossbeam_channel::unbounded::<()>();
+        let layout = unique_temp_path("httpcmd");
+        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
+            .expect("app boots");
+        app.handle_http_command("echo probe--xx++yy");
+        let mut seen = false;
+        for _ in 0..80 {
+            app.poll_panes();
+            let fid = app.ws().focused;
+            if let Some(p) = app.ws().pane(fid)
+                && p.screen().contents().contains("probe--xx++yy") {
+                    seen = true;
+                    break;
+                }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(seen, "doubled chars survived /command injection");
+        for w in &mut app.workspaces {
+            w.kill_all();
+        }
+        let _ = std::fs::remove_file(&layout);
+        rt.shutdown_background();
+    }
+
     /// Selection text: whole grid without an anchor, sub-rect with one.
     #[test]
     fn select_mode_extracts_text() {
@@ -6492,6 +6856,53 @@ mod tests {
         rt.shutdown_background();
     }
 
+    /// MCP clicks are pane-relative: they map onto the inner grid (border
+    /// inset) and forward only when the pane's app tracks the mouse.
+    #[test]
+    fn mcp_mouse_click_translates_pane_coords() {
+        use crate::mcp::McpReply;
+        let _guard = crate::pty::lock_pty_tests();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (wake, _rx) = crossbeam_channel::unbounded::<()>();
+        let layout = unique_temp_path("mcpclick");
+        let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
+            .expect("app boots");
+        let fid = app.ws().focused;
+        app.ws_mut()
+            .set_rects(&[(fid, ratatui::layout::Rect::new(0, 1, 80, 24))]);
+
+        // Without tracking the click is rejected with a helpful message.
+        match app.mcp_mouse_click(fid, 3, 2, crate::mouse::MouseButton::Left, None) {
+            McpReply::Err(e) => assert!(e.contains("mouse tracking"), "err: {e}"),
+            _ => panic!("expected rejection without tracking"),
+        }
+
+        // Out-of-grid coordinates are rejected before any hit-test.
+        app.ws_mut()
+            .pane_mut(fid)
+            .expect("pane")
+            .feed_for_test(b"\x1b[?1000h\x1b[?1006h");
+        match app.mcp_mouse_click(fid, 200, 2, crate::mouse::MouseButton::Left, None) {
+            McpReply::Err(e) => assert!(e.contains("outside the pane grid"), "err: {e}"),
+            _ => panic!("expected out-of-grid rejection"),
+        }
+
+        // In-bounds: press+release forwarded, reported by cell.
+        match app.mcp_mouse_click(fid, 3, 2, crate::mouse::MouseButton::Left, None) {
+            McpReply::Text(t) => assert!(t.contains("(3, 2)"), "text: {t}"),
+            _ => panic!("expected a click report"),
+        }
+
+        for w in &mut app.workspaces {
+            w.kill_all();
+        }
+        let _ = std::fs::remove_file(&layout);
+        rt.shutdown_background();
+    }
+
     /// Holding the button no longer streams identical motion reports: a
     /// repeat move in the same cell is coalesced, a new cell reports, and a
     /// fresh button gesture resets the cache.
@@ -7083,5 +7494,114 @@ mod tests {
             "shellrs-test-{tag}-{}-{nanos}.toml",
             std::process::id()
         ))
+    }
+
+    /// A pane-scoped MCP server driving the real App: open a server on the
+    /// focused pane, then call a tool over HTTP while the UI thread answers
+    /// pane queries (which only happens inside `poll_panes`).
+    #[test]
+    fn mcp_pane_serves_real_pane_queries() {
+        let _guard = crate::pty::lock_pty_tests();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (wake, _rx) = crossbeam_channel::unbounded::<()>();
+        let layout = unique_temp_path("mcp");
+        let mut cfg = Config::default();
+        cfg.general.mcp_port = 0; // ephemeral: no clash with a real server
+        let mut app = App::new(cfg, Some(layout.clone()), rt.handle(), &wake, None, None, false)
+            .expect("app boots");
+
+        app.open_mcp_pane(None);
+        let pane_id = app.ws().focused;
+        let port = app
+            .mcp_servers
+            .get(&pane_id)
+            .expect("MCP server attached")
+            .port;
+
+        // Type a unique marker so the screen query must read real pane state.
+        app.ws_mut()
+            .pane_mut(pane_id)
+            .expect("pane")
+            .write(b"echo mcp-probe-123\r");
+        let mut seen = false;
+        for _ in 0..80 {
+            app.poll_panes();
+            let hit = app
+                .ws()
+                .pane(pane_id)
+                .map(|p| p.screen().contents().contains("mcp-probe-123"))
+                .unwrap_or(false);
+            if hit {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(seen, "shell produced the probe line");
+
+        // Drive MCP on a worker thread; the UI thread must keep polling to
+        // answer the tool's pane query.
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let url = format!("http://127.0.0.1:{port}/mcp");
+            let post = |body: &str, session: Option<&str>| -> (String, Option<String>) {
+                let mut req = ureq::post(&url)
+                    .set("Content-Type", "application/json")
+                    .set("Accept", "application/json, text/event-stream")
+                    .set("MCP-Protocol-Version", "2025-11-25");
+                if let Some(s) = session {
+                    req = req.set("Mcp-Session-Id", s);
+                }
+                let resp = req.send_string(body).expect("response");
+                let sid = resp.header("mcp-session-id").map(str::to_string);
+                (resp.into_string().unwrap_or_default(), sid)
+            };
+            let init = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25", "capabilities": {},
+                    "clientInfo": { "name": "test", "version": "0" }
+                }
+            })
+            .to_string();
+            let (_, session) = post(&init, None);
+            let session = session.expect("session id");
+            let ready = serde_json::json!({
+                "jsonrpc": "2.0", "method": "notifications/initialized"
+            })
+            .to_string();
+            let _ = post(&ready, Some(&session));
+            let call = serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "shellrs_get_screen", "arguments": {} }
+            })
+            .to_string();
+            let (out, _) = post(&call, Some(&session));
+            let _ = done_tx.send(out);
+        });
+
+        let mut screen = None;
+        for _ in 0..400 {
+            app.poll_panes();
+            if let Ok(v) = done_rx.try_recv() {
+                screen = Some(v);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let screen = screen.expect("MCP get_screen completed");
+        assert!(
+            screen.contains("mcp-probe-123"),
+            "MCP screen did not contain the probe: {screen}"
+        );
+
+        for w in &mut app.workspaces {
+            w.kill_all();
+        }
+        let _ = std::fs::remove_file(&layout);
+        rt.shutdown_background();
     }
 }

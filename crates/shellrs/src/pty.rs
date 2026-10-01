@@ -79,6 +79,9 @@ pub struct Pane {
     /// forwarded as win32 input records so the child sees key press *and*
     /// release with real timing (held keys, sliders, modifiers).
     win32_input_mode: bool,
+    /// Status line for a pane-scoped MCP server (see `crate::mcp`), shown at
+    /// the top of the pane while the server runs. `None` for normal panes.
+    pub mcp_status: Option<String>,
 }
 
 /// How the child shell spells a "print my cwd" command.
@@ -326,6 +329,7 @@ impl Pane {
             shell_kind,
             last_out: std::time::Instant::now(),
             win32_input_mode: false,
+            mcp_status: None,
         })
     }
 

@@ -28,6 +28,7 @@ mod ipc;
 mod keys;
 mod layout;
 mod logging;
+mod mcp;
 mod mouse;
 mod pty;
 mod scrollback;
