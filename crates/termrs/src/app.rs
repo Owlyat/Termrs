@@ -151,6 +151,8 @@ pub enum Command {
     OpenMcpSplitH,
     OpenMcpSplitV,
     OpenMcpHere,
+    ShareTerminal,
+    StopSharing,
     ZoomPane,
     FocusNext,
     FocusPrev,
@@ -197,6 +199,8 @@ impl Command {
         (Command::OpenMcpSplitH, "Open MCP server splith"),
         (Command::OpenMcpSplitV, "Open MCP server splitv"),
         (Command::OpenMcpHere, "Open MCP server in current pane"),
+        (Command::ShareTerminal, "Share terminal (iroh link)"),
+        (Command::StopSharing, "Stop sharing this terminal"),
         (Command::ZoomPane, "Zoom pane (maximize)"),
         (Command::FocusNext, "Focus next pane"),
         (Command::FocusPrev, "Focus previous pane"),
@@ -1659,6 +1663,12 @@ pub struct App {
     /// [`App::poll_mcp`].
     mcp_query_tx: crossbeam_channel::Sender<crate::mcp::McpQuery>,
     mcp_query_rx: Option<crossbeam_channel::Receiver<crate::mcp::McpQuery>>,
+    /// iroh share sessions keyed by pane id (see `crate::share`).
+    share_sessions: std::collections::HashMap<usize, crate::share::ShareSession>,
+    /// Snapshot/input requests from share viewers land here; the UI thread
+    /// answers them in [`App::poll_share`].
+    share_query_tx: crossbeam_channel::Sender<crate::share::ShareQuery>,
+    share_query_rx: Option<crossbeam_channel::Receiver<crate::share::ShareQuery>>,
 }
 
 impl App {
@@ -1681,7 +1691,7 @@ impl App {
         // unless an explicit --layout override was given.
         let layout_path = match (server_mode, layout_override) {
             (true, Some(p)) => p,
-            (true, None) => std::env::temp_dir().join("shellrs-server-layout.toml"),
+            (true, None) => std::env::temp_dir().join("termrs-server-layout.toml"),
             (false, opt) => opt.unwrap_or_else(|| config.layout_path()),
         };
         let shell = config.general.shell.clone();
@@ -1715,6 +1725,7 @@ impl App {
             }
         };
         let (mcp_query_tx, mcp_query_rx) = crossbeam_channel::unbounded();
+        let (share_query_tx, share_query_rx) = crossbeam_channel::unbounded();
         let mut app = Self {
             config,
             braille: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),            workspaces,
@@ -1769,6 +1780,9 @@ impl App {
             mcp_servers: std::collections::HashMap::new(),
             mcp_query_tx,
             mcp_query_rx: Some(mcp_query_rx),
+            share_sessions: std::collections::HashMap::new(),
+            share_query_tx,
+            share_query_rx: Some(share_query_rx),
         };
         app.ws_mut().mark_seen();
         // Baseline mtime so hot-reload only fires on later changes.
@@ -2053,6 +2067,7 @@ impl App {
         self.poll_ipc();
         self.poll_http();
         self.poll_mcp();
+        self.poll_share();
         self.hot_reload_check();
     }
 
@@ -2589,7 +2604,7 @@ impl App {
         }
     }
 
-    /// JSON description of a pane for the MCP `shellrs_pane_info` tool.
+    /// JSON description of a pane for the MCP `termrs_pane_info` tool.
     fn mcp_pane_info(&self, pane_id: usize) -> Result<String, String> {
         let pane = self.find_pane(pane_id).ok_or_else(|| format!("pane {pane_id} is gone"))?;
         let workspace = self
@@ -2626,6 +2641,142 @@ impl App {
         for (id, text) in statuses {
             if let Some(p) = self.find_pane_mut(id) {
                 p.mcp_status = Some(text);
+            }
+        }
+    }
+
+    /// Start (or toggle off) sharing the focused pane over iroh.
+    fn share_focused(&mut self) {
+        let pane_id = self.ws().focused;
+        if self.share_sessions.contains_key(&pane_id) {
+            self.stop_sharing(pane_id);
+            return;
+        }
+        let code = crate::share::generate_code(self.config.share.code_len);
+        let page_url = self.config.share.page_url.clone();
+        let allow_control = self.config.share.allow_control;
+        match crate::share::start(
+            &self.rt,
+            self.share_query_tx.clone(),
+            pane_id,
+            code,
+            &page_url,
+            allow_control,
+        ) {
+            Ok(session) => {
+                let out_tx = session.shared.out_tx.clone();
+                let link = session.link.clone();
+                let code = session.code.clone();
+                if let Some(p) = self.find_pane_mut(pane_id) {
+                    p.set_share_out(Some(out_tx));
+                }
+                log::info!(
+                    "share pane {pane_id}: code {code}, ticket {} chars",
+                    session.ticket.len()
+                );
+                self.share_sessions.insert(pane_id, session);
+                self.status = match crate::clipboard::copy(&link) {
+                    Ok(()) => format!("sharing pane {pane_id} · code {code} · link copied"),
+                    Err(e) => format!("sharing pane {pane_id} · code {code} · copy failed: {e}"),
+                };
+            }
+            Err(e) => self.status = format!("share failed: {e}"),
+        }
+    }
+
+    /// Stop sharing `pane_id` (no-op with a status note when it is not shared).
+    fn stop_sharing(&mut self, pane_id: usize) {
+        match self.share_sessions.remove(&pane_id) {
+            Some(mut session) => {
+                session.stop();
+                if let Some(p) = self.find_pane_mut(pane_id) {
+                    p.set_share_out(None);
+                    p.share_status = None;
+                }
+                log::info!("share pane {pane_id} stopped");
+                self.status = format!("stopped sharing pane {pane_id}");
+            }
+            None => self.status = "pane is not being shared".into(),
+        }
+    }
+
+    /// Answer pending share-viewer queries, then stop sessions whose pane is
+    /// gone and refresh the rest's status line.
+    fn poll_share(&mut self) {
+        let queries: Vec<crate::share::ShareQuery> = match &self.share_query_rx {
+            Some(rx) => rx.try_iter().collect(),
+            None => Vec::new(),
+        };
+        for q in queries {
+            let reply = self.share_handle_query(q.pane_id, q.kind);
+            let _ = q.reply.send(reply);
+        }
+        self.share_reconcile();
+    }
+
+    fn share_handle_query(
+        &mut self,
+        pane_id: usize,
+        kind: crate::share::ShareQueryKind,
+    ) -> crate::share::ShareReply {
+        use crate::share::{ShareQueryKind as K, ShareReply as R};
+        match kind {
+            K::Snapshot { cols, rows } => match self.share_snapshot(pane_id, cols, rows) {
+                Ok(bytes) => R::Bytes(bytes),
+                Err(e) => R::Err(e),
+            },
+            K::Input(bytes) => match self.find_pane_mut(pane_id) {
+                Some(p) => {
+                    p.write(&bytes);
+                    R::Ok
+                }
+                None => R::Err(format!("pane {pane_id} is gone")),
+            },
+        }
+    }
+
+    /// Build a viewer snapshot: clear, re-assert input modes (application
+    /// cursor/keypad, bracketed paste, mouse), repaint the screen, place the
+    /// cursor, and prefix the pane's grid size so the viewer can match it.
+    fn share_snapshot(
+        &self,
+        pane_id: usize,
+        _cols: u16,
+        _rows: u16,
+    ) -> Result<Vec<u8>, String> {
+        let pane = self
+            .find_pane(pane_id)
+            .ok_or_else(|| format!("pane {pane_id} is gone"))?;
+        let screen = pane.screen();
+        let (rows, cols) = screen.size();
+        let mut ansi = Vec::new();
+        ansi.extend_from_slice(b"\x1b[2J\x1b[H");
+        ansi.extend_from_slice(&screen.input_mode_formatted());
+        ansi.extend_from_slice(&screen.contents_formatted());
+        let (r, c) = screen.cursor_position();
+        ansi.extend_from_slice(format!("\x1b[{};{}H", r + 1, c + 1).as_bytes());
+        Ok(termrs_share_proto::encode_snapshot(cols, rows, &ansi))
+    }
+
+    /// Stop share sessions whose pane closed; refresh the rest's status line.
+    fn share_reconcile(&mut self) {
+        let ids: Vec<usize> = self.share_sessions.keys().copied().collect();
+        for id in ids {
+            if self.find_pane(id).is_none()
+                && let Some(mut session) = self.share_sessions.remove(&id)
+            {
+                session.stop();
+                log::info!("share pane {id} stopped (pane closed)");
+            }
+        }
+        let statuses: Vec<(usize, String)> = self
+            .share_sessions
+            .iter()
+            .map(|(id, s)| (*id, format!("SHARE · code {}", s.code)))
+            .collect();
+        for (id, text) in statuses {
+            if let Some(p) = self.find_pane_mut(id) {
+                p.share_status = Some(text);
             }
         }
     }
@@ -4315,6 +4466,8 @@ impl App {
             Command::OpenMcpSplitH => self.open_mcp_pane(Some(SplitDir::Horizontal)),
             Command::OpenMcpSplitV => self.open_mcp_pane(Some(SplitDir::Vertical)),
             Command::OpenMcpHere => self.open_mcp_pane(None),
+            Command::ShareTerminal => self.share_focused(),
+            Command::StopSharing => self.stop_sharing(self.ws().focused),
             Command::ZoomPane => self.zoom_pane(),
             Command::FocusNext => self.cycle(1),
             Command::FocusPrev => self.cycle(-1),
@@ -4785,7 +4938,7 @@ impl App {
             Some(p) => p.title.clone(),
             None => "shell".to_string(),
         };
-        format!("shellrs - {} [{}]", name, ws.name)
+        format!("termrs - {} [{}]", name, ws.name)
     }
 
     /// Open the config in `$EDITOR`/`$VISUAL` **inside the focused pane**.
@@ -5495,7 +5648,7 @@ mod tests {
         let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
             .expect("app boots");
         let dir = std::env::temp_dir().join(format!(
-            "shellrs-split-cwd-{}-{}",
+            "termrs-split-cwd-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5798,7 +5951,7 @@ mod tests {
         let layout = unique_temp_path("complete");
         let mut app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
             .expect("app boots");
-        let dir = std::env::temp_dir().join(format!("shellrs-cwd-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("termrs-cwd-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("zed.png"), b"x").unwrap();
         std::fs::write(dir.join("alpha.txt"), b"x").unwrap();
@@ -5957,7 +6110,7 @@ mod tests {
     #[test]
     fn font_probe_visible_fills_and_caches() {
         let dir = std::env::temp_dir().join(format!(
-            "shellrs-fontprobe-{}-{}",
+            "termrs-fontprobe-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -6005,7 +6158,7 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let dir = std::env::temp_dir().join(format!(
-            "shellrs-fontpick-{}-{}",
+            "termrs-fontpick-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -6135,7 +6288,7 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let dir = std::env::temp_dir().join(format!(
-            "shellrs-fontsize-{}-{}",
+            "termrs-fontsize-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -7204,7 +7357,7 @@ mod tests {
         let app = App::new(Config::default(), Some(layout.clone()), rt.handle(), &wake, None, None, false)
             .expect("app boots");
         let title = app.window_title();
-        assert!(title.starts_with("shellrs - "), "title: {title}");
+        assert!(title.starts_with("termrs - "), "title: {title}");
         assert!(title.contains("main"), "title: {title}");
         let mut app = app;
         for w in &mut app.workspaces {
@@ -7614,7 +7767,7 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         std::env::temp_dir().join(format!(
-            "shellrs-test-{tag}-{}-{nanos}.toml",
+            "termrs-test-{tag}-{}-{nanos}.toml",
             std::process::id()
         ))
     }
@@ -7699,7 +7852,7 @@ mod tests {
             let _ = post(&ready, Some(&session));
             let call = serde_json::json!({
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": { "name": "shellrs_get_screen", "arguments": {} }
+                "params": { "name": "termrs_get_screen", "arguments": {} }
             })
             .to_string();
             let (out, _) = post(&call, Some(&session));

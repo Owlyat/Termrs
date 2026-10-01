@@ -193,7 +193,7 @@ fn parse_hex_opt(s: &str, what: &str) -> Option<[u8; 3]> {
     match parse_hex_str(s) {
         Some(rgb) => Some(rgb),
         None => {
-            eprintln!("shellrs: bad {what} {s:?}; ignoring");
+            eprintln!("termrs: bad {what} {s:?}; ignoring");
             None
         }
     }
@@ -204,7 +204,7 @@ fn parse_hex(s: &str, what: &str, fallback: [u8; 3]) -> [u8; 3] {
     match parse_hex_str(s) {
         Some(rgb) => rgb,
         None => {
-            eprintln!("shellrs: bad {what} {s:?}; using default");
+            eprintln!("termrs: bad {what} {s:?}; using default");
             fallback
         }
     }
@@ -620,7 +620,7 @@ pub struct Commands {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mouse {
     /// Forward mouse events to apps that request tracking (vim, tmux,
-    /// TUIs) and open URLs on modifier+click. Off = shellrs handles all
+    /// TUIs) and open URLs on modifier+click. Off = termrs handles all
     /// clicks itself (focus panes, scroll) as before.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -640,6 +640,42 @@ impl Default for Mouse {
         Self {
             enabled: true,
             url_mod: default_url_mod(),
+        }
+    }
+}
+
+/// Terminal sharing settings (`Share terminal` palette command).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Share {
+    /// Public URL of the share page (the wasm iroh client + xterm.js). The
+    /// copied link is `page_url#ticket=…&code=…`. Empty = the ticket itself is
+    /// copied (paste it into a locally opened copy of the page).
+    #[serde(default = "default_share_page_url")]
+    pub page_url: String,
+    /// Let the first authenticated viewer type; any others watch. `false`
+    /// makes every viewer read-only.
+    #[serde(default = "default_true")]
+    pub allow_control: bool,
+    /// Length of the generated session code (clamped to 4..=16).
+    #[serde(default = "default_share_code_len")]
+    pub code_len: usize,
+}
+
+fn default_share_code_len() -> usize {
+    6
+}
+
+/// Public URL of the termrs share page (GitHub Pages).
+fn default_share_page_url() -> String {
+    "https://Owlyat.github.io/termrs/".into()
+}
+
+impl Default for Share {
+    fn default() -> Self {
+        Self {
+            page_url: default_share_page_url(),
+            allow_control: true,
+            code_len: default_share_code_len(),
         }
     }
 }
@@ -666,6 +702,8 @@ pub struct Config {
     pub macros: Vec<Macro>,
     #[serde(default)]
     pub mouse: Mouse,
+    #[serde(default)]
+    pub share: Share,
     /// Path this config was loaded from (not serialized).
     #[serde(skip)]
     pub source: Option<PathBuf>,
@@ -684,6 +722,7 @@ impl Config {
             keys: Keys::default(),
             macros: Vec::new(),
             mouse: Mouse::default(),
+            share: Share::default(),
             source: None,
         })
         .unwrap_or_default()
@@ -699,7 +738,7 @@ impl Config {
     }
 
     /// Directory holding app state: the config's own directory when known,
-    /// else `~/.config/shellrs` (created on demand).
+    /// else `~/.config/termrs` (created on demand).
     pub fn state_dir(&self) -> PathBuf {
         if let Some(parent) = self.source.as_ref().and_then(|p| p.parent())
             && !parent.as_os_str().is_empty() {
@@ -708,11 +747,11 @@ impl Config {
         Self::home_dir().unwrap_or_else(|| PathBuf::from("."))
     }
 
-    /// `shellrs.log` inside [`Config::state_dir`] (directory is created).
+    /// `termrs.log` inside [`Config::state_dir`] (directory is created).
     pub fn log_path(&self) -> PathBuf {
         let dir = self.state_dir();
         let _ = std::fs::create_dir_all(&dir);
-        dir.join("shellrs.log")
+        dir.join("termrs.log")
     }
 
     /// SQLite file for saved commands: `[commands] db` when set, else
@@ -759,18 +798,18 @@ impl Config {
         }
     }
 
-    /// Home config dir: `~/.config/shellrs` (`%USERPROFILE%` preferred on
+    /// Home config dir: `~/.config/termrs` (`%USERPROFILE%` preferred on
     /// Windows, else `$HOME`). The canonical home for `config.toml` and,
-    /// by default, `layout.toml`, `commands.db` and `shellrs.log`.
+    /// by default, `layout.toml`, `commands.db` and `termrs.log`.
     pub fn home_dir() -> Option<PathBuf> {
         std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .map(PathBuf::from)
-            .map(|base| base.join(".config").join("shellrs"))
+            .map(|base| base.join(".config").join("termrs"))
             .ok()
     }
 
-    /// Canonical config file: `~/.config/shellrs/config.toml`, if a home
+    /// Canonical config file: `~/.config/termrs/config.toml`, if a home
     /// directory is known.
     pub fn default_path() -> Option<PathBuf> {
         Self::home_dir().map(|d| d.join("config.toml"))
@@ -784,7 +823,7 @@ impl Config {
             out.push(home_cfg);
         }
         out.push(PathBuf::from("config.toml"));
-        out.push(PathBuf::from("crates/shellrs/config.toml"));
+        out.push(PathBuf::from("crates/termrs/config.toml"));
         if let Ok(cwd) = std::env::current_dir() {
             let p = cwd.join("config.toml");
             if !out.contains(&p) {
@@ -819,12 +858,12 @@ impl Config {
             }
         match std::fs::write(path, Self::default_toml()) {
             Ok(()) => {
-                eprintln!("shellrs: wrote default config to {}", path.display());
+                eprintln!("termrs: wrote default config to {}", path.display());
                 Some(path.to_path_buf())
             }
             Err(e) => {
                 eprintln!(
-                    "shellrs: cannot write default config to {}: {e}",
+                    "termrs: cannot write default config to {}: {e}",
                     path.display()
                 );
                 None
@@ -856,6 +895,7 @@ impl Config {
             keys: Keys::default(),
             macros: Vec::new(),
             mouse: Mouse::default(),
+            share: Share::default(),
             source: None,
         }
     }
@@ -875,6 +915,7 @@ impl Config {
                     keys: Keys::default(),
             macros: Vec::new(),
             mouse: Mouse::default(),
+                    share: Share::default(),
                     source: Some(path.to_path_buf()),
                 };
             }
@@ -888,7 +929,7 @@ impl Config {
                 cfg
             }
             Err(e) => {
-                eprintln!("shellrs: bad config {}: {e}; using defaults", path.display());
+                eprintln!("termrs: bad config {}: {e}; using defaults", path.display());
                 Self {
                     general: General::default(),
                     window: Window::default(),
@@ -899,6 +940,7 @@ impl Config {
                     keys: Keys::default(),
             macros: Vec::new(),
             mouse: Mouse::default(),
+                    share: Share::default(),
                     source: Some(path.to_path_buf()),
                 }
             }
@@ -1006,13 +1048,32 @@ mod tests {
         assert_eq!(cfg.mouse.url_mod, "ctrl");
     }
 
+    #[test]
+    fn share_section_parses() {
+        let cfg: Config = toml::from_str(
+            "[share]\npage_url = \"https://example.com/termrs\"\nallow_control = false\ncode_len = 10\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.share.page_url, "https://example.com/termrs");
+        assert!(!cfg.share.allow_control);
+        assert_eq!(cfg.share.code_len, 10);
+        // Absent section keeps defaults.
+        let cfg: Config = toml::from_str("[keys]\nquit = \"alt+q\"\n").unwrap();
+        assert_eq!(cfg.share.page_url, "https://Owlyat.github.io/termrs/");
+        assert!(cfg.share.allow_control);
+        assert_eq!(cfg.share.code_len, 6);
+        // A `[share]` section without page_url also gets the default URL.
+        let cfg: Config = toml::from_str("[share]\nallow_control = true\n").unwrap();
+        assert_eq!(cfg.share.page_url, "https://Owlyat.github.io/termrs/");
+    }
+
     /// The `.config` home is the canonical config location and the first
     /// search candidate; bootstrapping writes parseable defaults there.
     #[test]
     fn config_home_is_dotconfig_first() {
         let home = Config::home_dir().expect("home dir known");
         assert!(
-            home.ends_with(".config/shellrs") || home.ends_with(".config\\shellrs"),
+            home.ends_with(".config/termrs") || home.ends_with(".config\\termrs"),
             "home: {}",
             home.display()
         );
@@ -1023,14 +1084,14 @@ mod tests {
 
         // Bootstrap into an isolated temp dir (never the real home).
         let dir = std::env::temp_dir().join(format!(
-            "shellrs-cfg-{}-{}",
+            "termrs-cfg-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        let path = dir.join("shellrs").join("config.toml");
+        let path = dir.join("termrs").join("config.toml");
         let written = Config::bootstrap_default_at(&path).expect("bootstrap");
         assert_eq!(written, path);
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1191,7 +1252,7 @@ mod tests {
     #[test]
     fn write_font_settings_roundtrip() {
         let dir = std::env::temp_dir().join(format!(
-            "shellrs-cfgfont-{}-{}",
+            "termrs-cfgfont-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

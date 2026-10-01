@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>termrs · shared terminal</title>
+    <link rel="stylesheet" href="./vendor/xterm.css" />
+    <link rel="stylesheet" href="./style.css" />
+    <!-- xterm.js is vendored (no CDN); it exposes `Terminal` on the window. -->
+    <script src="./vendor/xterm.js"></script>
+  </head>
+  <body>
+    <header>
+      <span class="brand">termrs</span>
+      <span class="tag">shared terminal</span>
+      <span id="status">idle</span>
+    </header>
+
+    <main>
+      <div id="terminal"></div>
+    </main>
+
+    <dialog id="join">
+      <form method="dialog">
+        <h1>Join a shared terminal</h1>
+        <p class="hint">
+          Paste the ticket (and session code) the host is showing. If you
+          opened a share link, these are filled in already.
+        </p>
+        <label>
+          <span>Ticket</span>
+          <input id="ticket" placeholder="endpoint ticket" autocomplete="off" spellcheck="false" />
+        </label>
+        <label>
+          <span>Code</span>
+          <input id="code" placeholder="session code" autocomplete="off" spellcheck="false" />
+        </label>
+        <button id="connect" value="connect">Connect</button>
+      </form>
+    </dialog>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

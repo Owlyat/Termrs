@@ -1,4 +1,4 @@
-//! `shellrs` - a terminal emulator that opens its own native window.
+//! `termrs` - a terminal emulator that opens its own native window.
 //!
 //! Panes spawn your shell in a `portable-pty`, output is parsed with `vt100`,
 //! and the whole UI is drawn with ratatui into a `winit` + `wgpu` window via
@@ -33,6 +33,7 @@ mod mouse;
 mod pty;
 mod scrollback;
 mod server;
+mod share;
 mod ui;
 mod window;
 mod workspace;
@@ -51,20 +52,20 @@ Views: shift+pageup scrollback, ctrl+i image, f1 big-text help.
 Window: [window] background_image, opacity (0..1 over the image),
 decorations = false for a borderless window.
 Font: set [general] font to a .ttf path (else auto-detected).
-Logging: --debug writes shellrs.log next to the config; --debug-dir <dir>
+Logging: --debug writes termrs.log next to the config; --debug-dir <dir>
 writes it there instead (created if missing). Panics are logged too.
 All keys are configurable in [keys] (see --print-default-config).";
 
 /// Command-line interface (parsed with clap).
 #[derive(Parser, Debug)]
 #[command(
-    name = "shellrs",
+    name = "termrs",
     version,
     about = "Split-pane terminal emulator with its own native window.",
     long_about = LONG_ABOUT
 )]
 struct Cli {
-    /// Config file path (default: ~/.config/shellrs/config.toml, created
+    /// Config file path (default: ~/.config/termrs/config.toml, created
     /// with built-in defaults on first run; falls back to cwd and next to
     /// the binary for development).
     #[arg(short = 'c', long)]
@@ -78,15 +79,15 @@ struct Cli {
     /// Boot the window, render one frame, then exit.
     #[arg(long)]
     selftest: bool,
-    /// Debug logging to shellrs.log in the config directory
+    /// Debug logging to termrs.log in the config directory
     /// (on by default in debug builds).
     #[arg(long)]
     debug: bool,
-    /// Write shellrs.log into this directory instead (created if missing).
+    /// Write termrs.log into this directory instead (created if missing).
     /// Implies debug logging.
     #[arg(long, value_name = "DIR")]
     debug_dir: Option<std::path::PathBuf>,
-    /// IPC client: send a command to the running shellrs instance.
+    /// IPC client: send a command to the running termrs instance.
     #[command(subcommand)]
     cli: Option<CliCommand>,
     /// Start an HTTP server for remote control (e.g. --server localhost:12345).
@@ -97,7 +98,7 @@ struct Cli {
     master: bool,
 }
 
-/// IPC subcommands (communicate with the running shellrs instance).
+/// IPC subcommands (communicate with the running termrs instance).
 #[derive(clap::Subcommand, Debug)]
 enum CliCommand {
     /// Split the focused pane and run a command in the new pane.
@@ -131,7 +132,7 @@ fn main() -> std::process::ExitCode {
         {
             use std::os::windows::process::CommandExt;
             use std::process::Command;
-            let exe = std::env::current_exe().unwrap_or_else(|_| "shellrs.exe".into());
+            let exe = std::env::current_exe().unwrap_or_else(|_| "termrs.exe".into());
             let mut args: Vec<String> = vec!["--server".into()];
             if let Some(ref addr) = cli.server {
                 args.push(addr.clone());
@@ -176,7 +177,7 @@ fn main() -> std::process::ExitCode {
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("shellrs: {e}");
+            eprintln!("termrs: {e}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -206,12 +207,12 @@ fn run_cli(cmd: CliCommand) -> std::process::ExitCode {
                 }
                 std::process::ExitCode::SUCCESS
             } else {
-                eprintln!("shellrs: {}", resp.error.unwrap_or("unknown error".into()));
+                eprintln!("termrs: {}", resp.error.unwrap_or("unknown error".into()));
                 std::process::ExitCode::FAILURE
             }
         }
         Err(e) => {
-            eprintln!("shellrs: {e}");
+            eprintln!("termrs: {e}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -265,15 +266,15 @@ fn attach_parent_console() {
     }
 }
 
-/// Log to `<config-dir>/shellrs.log`, or `<debug-dir>/shellrs.log` when
+/// Log to `<config-dir>/termrs.log`, or `<debug-dir>/termrs.log` when
 /// `--debug-dir` was given. Failures fall back to stderr only.
 fn init_file_logger(cfg: &config::Config, debug_dir: Option<&std::path::Path>) {
     let path = match debug_dir {
         Some(dir) => {
             if let Err(e) = std::fs::create_dir_all(dir) {
-                eprintln!("shellrs: cannot create {}: {e}", dir.display());
+                eprintln!("termrs: cannot create {}: {e}", dir.display());
             }
-            dir.join("shellrs.log")
+            dir.join("termrs.log")
         }
         None => cfg.log_path(),
     };

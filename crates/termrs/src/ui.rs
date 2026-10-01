@@ -108,10 +108,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         } else {
             title
         };
-        // Pane-scoped MCP server status (see `crate::mcp`) sits at the top.
-        let title = match &pane.mcp_status {
-            Some(s) => format!("{s}  {title}"),
-            None => title,
+        // Pane-scoped share/MCP status (see `crate::share`, `crate::mcp`)
+        // sits at the top of the title.
+        let title = match (&pane.share_status, &pane.mcp_status) {
+            (Some(s), Some(m)) => format!("{s}  {m}  {title}"),
+            (Some(s), None) => format!("{s}  {title}"),
+            (None, Some(m)) => format!("{m}  {title}"),
+            (None, None) => title,
         };
         let accent = theme
             .accent
@@ -132,7 +135,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         // stacked blocks (progress gauges, solid art) show thin grid lines.
         // Real terminals draw blocks as fills; emulate that here by turning
         // a full block into a space painted with the glyph's color. Only the
-        // hosted pane area is touched, never shellrs's own chrome.
+        // hosted pane area is touched, never termrs's own chrome.
         {
             let inner = Block::default().borders(Borders::ALL).inner(*rect);
             normalize_block_cells(frame.buffer_mut(), inner, theme);
@@ -233,7 +236,7 @@ fn render_about(frame: &mut Frame, app: &App, area: Rect) {
         .pixel_size(PixelSize::Full)
         .style(Style::default().fg(Color::Cyan))
         .centered()
-        .lines(vec![Line::from("SHELLRS")])
+        .lines(vec![Line::from("TERMRS")])
         .build();
     frame.render_widget(banner, rows[0]);
     let hints = format!(

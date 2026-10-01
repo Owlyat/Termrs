@@ -1,6 +1,6 @@
 //! Image decoding shared by the backdrop and the `ctrl+i` overlay.
 //!
-//! Shellrs is the terminal, so it draws images itself via a wgpu post-process
+//! Termrs is the terminal, so it draws images itself via a wgpu post-process
 //! pass (see `image_gpu.rs`) rather than emitting sixel/kitty sequences for an
 //! outer terminal to interpret.
 

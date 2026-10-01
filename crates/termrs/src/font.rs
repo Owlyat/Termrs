@@ -49,7 +49,7 @@ pub fn load_set(configured: &str, fallbacks: &[String]) -> Result<FontSet, Strin
                     normalize_fallback_metrics(primary, &mut bytes);
                     set.push(Box::leak(bytes.into_boxed_slice()) as &'static [u8]);
                 }
-                Err(e) => eprintln!("shellrs: cannot read fallback font {f:?}: {e}"),
+                Err(e) => eprintln!("termrs: cannot read fallback font {f:?}: {e}"),
             }
         }
     }
@@ -602,7 +602,7 @@ mod tests {
 
     fn unique_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "shellrs-fonts-{tag}-{}-{}",
+            "termrs-fonts-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -685,7 +685,7 @@ mod tests {
     #[test]
     fn scan_dirs_tolerates_missing_dirs() {
         let missing = std::env::temp_dir().join(format!(
-            "shellrs-fonts-nope-{}-{}",
+            "termrs-fonts-nope-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

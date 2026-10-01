@@ -66,11 +66,11 @@ pub fn ipc_path() -> PathBuf {
     let id = std::process::id();
     #[cfg(windows)]
     {
-        PathBuf::from(format!(r"\\.\pipe\shellrs-{id}"))
+        PathBuf::from(format!(r"\\.\pipe\termrs-{id}"))
     }
     #[cfg(not(windows))]
     {
-        std::env::temp_dir().join(format!("shellrs-{id}"))
+        std::env::temp_dir().join(format!("termrs-{id}"))
     }
 }
 
@@ -247,7 +247,7 @@ pub fn send_request(req: &Request) -> Result<Response, String> {
             )
         };
         if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-            return Err(format!("cannot connect to shellrs at {path:?} (is shellrs running?)"));
+            return Err(format!("cannot connect to termrs at {path:?} (is termrs running?)"));
         }
         let mut stream = unsafe { std::fs::File::from_raw_handle(handle as _) };
         let line = serde_json::to_string(req).map_err(|e| e.to_string())?;
@@ -261,7 +261,7 @@ pub fn send_request(req: &Request) -> Result<Response, String> {
     #[cfg(not(windows))]
     {
         let mut stream = std::os::unix::net::UnixStream::connect(&path)
-            .map_err(|e| format!("cannot connect to shellrs at {path:?}: {e} (is shellrs running?)"))?;
+            .map_err(|e| format!("cannot connect to termrs at {path:?}: {e} (is termrs running?)"))?;
         let line = serde_json::to_string(req).map_err(|e| e.to_string())?;
         stream.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
         stream.write_all(b"\n").map_err(|e| e.to_string())?;

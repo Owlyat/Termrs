@@ -94,7 +94,7 @@ impl LayoutFile {
             Ok(f) if !f.workspaces.is_empty() => Some(f),
             Ok(_) => None,
             Err(e) => {
-                eprintln!("shellrs: bad layout {}: {e}; ignoring", path.display());
+                eprintln!("termrs: bad layout {}: {e}; ignoring", path.display());
                 None
             }
         }
@@ -148,7 +148,7 @@ impl LayoutFile {
                 match Workspace::from_layout(&w.name, &w.tree, &dirs, shell, scrollback, rt, wake) {
                 Ok(ws) => Some(ws),
                 Err(e) => {
-                    eprintln!("shellrs: cannot restore workspace {}: {e}", w.name);
+                    eprintln!("termrs: cannot restore workspace {}: {e}", w.name);
                     None
                 }
             }})
@@ -220,7 +220,7 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "shellrs-layout-{}-{nanos}.toml",
+            "termrs-layout-{}-{nanos}.toml",
             std::process::id()
         ));
         file.save(&path).expect("layout saves");
@@ -256,7 +256,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let base = std::env::temp_dir().join(format!("shellrs-dirs-{}-{nanos}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("termrs-dirs-{}-{nanos}", std::process::id()));
         let dir_a = base.join("a");
         let dir_b = base.join("b");
         std::fs::create_dir_all(&dir_a).unwrap();

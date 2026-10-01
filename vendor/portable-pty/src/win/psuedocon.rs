@@ -24,7 +24,7 @@ use winapi::um::winnt::HANDLE;
 
 pub type HPCON = HANDLE;
 
-#[allow(dead_code)] // shellrs: kept for reference; intentionally not passed.
+#[allow(dead_code)] // termrs: kept for reference; intentionally not passed.
 pub const PSUEDOCONSOLE_INHERIT_CURSOR: DWORD = 0x1;
 pub const PSEUDOCONSOLE_RESIZE_QUIRK: DWORD = 0x2;
 pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: DWORD = 0x4;
@@ -85,7 +85,7 @@ impl PsuedoCon {
                 size,
                 input.as_raw_handle() as _,
                 output.as_raw_handle() as _,
-                // shellrs: PSUEDOCONSOLE_INHERIT_CURSOR is deliberately NOT
+                // termrs: PSUEDOCONSOLE_INHERIT_CURSOR is deliberately NOT
                 // set. Upstream portable-pty passes it, which makes each new
                 // ConPTY inherit the *previous* console's input line. Under a
                 // shell host like Clink the next pane then starts with the

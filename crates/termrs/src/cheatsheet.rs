@@ -48,7 +48,7 @@ pub fn fetch_topic(topic: &str) -> Result<String, String> {
     }
     let url = format!("https://cheat.sh/{}?T", encode_topic(topic));
     let text = ureq::get(&url)
-        .set("User-Agent", "curl/8.0 (shellrs)")
+        .set("User-Agent", "curl/8.0 (termrs)")
         .set("Accept", "text/plain")
         .timeout(FETCH_TIMEOUT)
         .call()

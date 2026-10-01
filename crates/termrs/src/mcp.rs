@@ -169,11 +169,11 @@ pub fn start_pane_mcp(
     rt.spawn(async move {
         let details = InitializeResult {
             server_info: Implementation {
-                name: "shellrs-pane".into(),
+                name: "termrs-pane".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
-                title: Some(format!("shellrs MCP (pane {pane_id})")),
+                title: Some(format!("termrs MCP (pane {pane_id})")),
                 description: Some(
-                    "Drive a single shellrs terminal pane: run commands, press keys, \
+                    "Drive a single termrs terminal pane: run commands, press keys, \
                      read the screen. Closing the pane stops this server."
                         .into(),
                 ),
@@ -185,11 +185,11 @@ pub fn start_pane_mcp(
                 ..Default::default()
             },
             instructions: Some(
-                "This server controls ONE terminal pane of the shellrs app. Use \
-                 shellrs_run_command to execute shell commands and read their output, \
-                 shellrs_press_key, shellrs_mouse_click and shellrs_mouse_drag to drive \
-                 interactive programs, shellrs_get_screen to inspect the current terminal, and \
-                 shellrs_screenshot for an image of the pane. There is deliberately no \
+                "This server controls ONE terminal pane of the termrs app. Use \
+                 termrs_run_command to execute shell commands and read their output, \
+                 termrs_press_key, termrs_mouse_click and termrs_mouse_drag to drive \
+                 interactive programs, termrs_get_screen to inspect the current terminal, and \
+                 termrs_screenshot for an image of the pane. There is deliberately no \
                  tool to close the app."
                     .into(),
             ),
@@ -440,7 +440,7 @@ async fn mouse_drag(
 //***********//
 
 #[mcp_tool(
-    name = "shellrs_run_command",
+    name = "termrs_run_command",
     title = "Run a shell command in the pane",
     description = "Type a command into this pane's shell and press Enter, then return \
                    the terminal contents after a short delay.",
@@ -454,7 +454,7 @@ pub struct RunCommandTool {
 }
 
 #[mcp_tool(
-    name = "shellrs_press_key",
+    name = "termrs_press_key",
     title = "Press a key in the pane",
     description = "Send a single key press to the pane, e.g. for interactive programs. \
                    `key` is one of Enter, Escape, Backspace, Tab, Up, Down, Left, Right, \
@@ -471,7 +471,7 @@ pub struct PressKeyTool {
 }
 
 #[mcp_tool(
-    name = "shellrs_mouse_click",
+    name = "termrs_mouse_click",
     title = "Click in the pane",
     description = "Send a mouse click (press then release) to a cell of this pane, for \
                    interactive apps that enable mouse tracking. Coordinates are zero-based \
@@ -495,7 +495,7 @@ pub struct MouseClickTool {
 }
 
 #[mcp_tool(
-    name = "shellrs_mouse_drag",
+    name = "termrs_mouse_drag",
     title = "Drag in the pane",
     description = "Press `button` at a start cell, move the pointer to an end cell, then \
                    release, for interactive apps that enable mouse tracking. Coordinates are \
@@ -523,7 +523,7 @@ pub struct MouseDragTool {
 }
 
 #[mcp_tool(
-    name = "shellrs_interrupt",
+    name = "termrs_interrupt",
     title = "Interrupt the foreground process",
     description = "Send Ctrl+C (interrupt) to the pane, stopping whatever is running.",
     destructive_hint = true
@@ -532,7 +532,7 @@ pub struct MouseDragTool {
 pub struct InterruptTool {}
 
 #[mcp_tool(
-    name = "shellrs_get_screen",
+    name = "termrs_get_screen",
     title = "Read the terminal screen",
     description = "Return the current visible text of the pane as plain text.",
     read_only_hint = true
@@ -541,7 +541,7 @@ pub struct InterruptTool {}
 pub struct GetScreenTool {}
 
 #[mcp_tool(
-    name = "shellrs_screenshot",
+    name = "termrs_screenshot",
     title = "Screenshot the pane",
     description = "Return a PNG image of the pane's current contents.",
     read_only_hint = true
@@ -550,7 +550,7 @@ pub struct GetScreenTool {}
 pub struct ScreenshotTool {}
 
 #[mcp_tool(
-    name = "shellrs_pane_info",
+    name = "termrs_pane_info",
     title = "Describe the pane",
     description = "Return JSON with the pane id, title, working directory, shell and \
                    liveness. Never includes a way to quit the application.",
@@ -651,7 +651,7 @@ mod tests {
             "params": {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": { "name": "shellrs-test", "version": "0.0" }
+                "clientInfo": { "name": "termrs-test", "version": "0.0" }
             }
         })
         .to_string();
@@ -687,7 +687,7 @@ mod tests {
             "params": {
                 "protocolVersion": "2025-11-25",
                 "capabilities": {},
-                "clientInfo": { "name": "shellrs-test", "version": "0.0" }
+                "clientInfo": { "name": "termrs-test", "version": "0.0" }
             }
         })
         .to_string();
@@ -709,14 +709,14 @@ mod tests {
         .to_string();
         let (list_body, _) = post_rpc(&url, &list, Some(&session));
         for tool in [
-            "shellrs_run_command",
-            "shellrs_press_key",
-            "shellrs_mouse_click",
-            "shellrs_mouse_drag",
-            "shellrs_interrupt",
-            "shellrs_get_screen",
-            "shellrs_screenshot",
-            "shellrs_pane_info",
+            "termrs_run_command",
+            "termrs_press_key",
+            "termrs_mouse_click",
+            "termrs_mouse_drag",
+            "termrs_interrupt",
+            "termrs_get_screen",
+            "termrs_screenshot",
+            "termrs_pane_info",
         ] {
             assert!(list_body.contains(tool), "tools/list missing {tool}: {list_body}");
         }
@@ -731,42 +731,42 @@ mod tests {
             post_rpc(&url, &body, Some(&session)).0
         };
 
-        let screen = call(3, "shellrs_get_screen", serde_json::json!({}));
+        let screen = call(3, "termrs_get_screen", serde_json::json!({}));
         assert!(screen.contains("SCREEN-CONTENT"), "get_screen: {screen}");
 
         let run = call(
             4,
-            "shellrs_run_command",
+            "termrs_run_command",
             serde_json::json!({ "command": "echo hi" }),
         );
         assert!(run.contains("SCREEN-CONTENT"), "run_command: {run}");
 
-        let key = call(5, "shellrs_press_key", serde_json::json!({ "key": "Enter" }));
+        let key = call(5, "termrs_press_key", serde_json::json!({ "key": "Enter" }));
         assert!(key.contains("key sent"), "press_key: {key}");
 
         let click = call(
             9,
-            "shellrs_mouse_click",
+            "termrs_mouse_click",
             serde_json::json!({ "col": 3, "row": 2, "button": "right" }),
         );
         assert!(click.contains("clicked Right"), "mouse_click: {click}");
 
         let drag = call(
             10,
-            "shellrs_mouse_drag",
+            "termrs_mouse_drag",
             serde_json::json!({ "col": 1, "row": 1, "to_col": 5, "to_row": 4 }),
         );
         assert!(drag.contains("dragged Left"), "mouse_drag: {drag}");
 
-        let intr = call(6, "shellrs_interrupt", serde_json::json!({}));
+        let intr = call(6, "termrs_interrupt", serde_json::json!({}));
         assert!(intr.contains("interrupt sent"), "interrupt: {intr}");
 
-        let shot = call(7, "shellrs_screenshot", serde_json::json!({}));
+        let shot = call(7, "termrs_screenshot", serde_json::json!({}));
         assert!(shot.contains("image/png"), "screenshot: {shot}");
         // base64 of the PNG magic bytes (mock is a 4-byte PNG).
         assert!(shot.contains("iVBORw"), "screenshot not base64 PNG: {shot}");
 
-        let info = call(8, "shellrs_pane_info", serde_json::json!({}));
+        let info = call(8, "termrs_pane_info", serde_json::json!({}));
         assert!(info.contains("pane_id"), "pane_info: {info}");
 
         stop.store(true, Ordering::Relaxed);

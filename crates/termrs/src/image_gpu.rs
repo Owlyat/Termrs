@@ -1,7 +1,7 @@
 //! GPU layers that sit around the terminal text.
 //!
 //! `sixel`/`kitty` are protocols a terminal uses to *receive* images from the
-//! programs it hosts; shellrs **is** the terminal, so it draws images itself.
+//! programs it hosts; termrs **is** the terminal, so it draws images itself.
 //! This plugs into `ratatui-wgpu`'s `PostProcessor` hook and paints, in order:
 //!
 //! 1. an optional **backdrop** image filling the window (its `opacity` is the
@@ -455,13 +455,13 @@ impl PostProcessor for ImagePostProcessor {
         );
         let _transparent = surface_config.alpha_mode != wgpu::CompositeAlphaMode::Opaque;
         let linear = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("shellrs sampler"),
+            label: Some("termrs sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         let text_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("shellrs text bg"),
+            label: Some("termrs text bg"),
             contents: &text_params_bytes(
                 [
                     bg_u8[0] as f32 / 255.0,
@@ -561,7 +561,7 @@ impl PostProcessor for ImagePostProcessor {
             if self.braille_buffer.is_none() || self.braille_cap < braille_bytes.len() {
                 let cap = braille_bytes.len().next_power_of_two().max(1024);
                 self.braille_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("shellrs braille"),
+                    label: Some("termrs braille"),
                     size: cap as u64,
                     usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
@@ -574,7 +574,7 @@ impl PostProcessor for ImagePostProcessor {
         }
 
         let text_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shellrs text bg"),
+            label: Some("termrs text bg"),
             layout: &self.text.layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -593,7 +593,7 @@ impl PostProcessor for ImagePostProcessor {
         });
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("shellrs surface"),
+            label: Some("termrs surface"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: surface_view,
                 resolve_target: None,
@@ -673,11 +673,11 @@ fn build_text_stage(
     premultiplied: bool,
 ) -> Stage {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("shellrs text blit"),
+        label: Some("termrs text blit"),
         source: wgpu::ShaderSource::Wgsl(TEXT_WGSL.into()),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("shellrs text bgl"),
+        label: Some("termrs text bgl"),
         entries: &[
             texture_entry(0),
             sampler_entry(1),
@@ -694,12 +694,12 @@ fn build_text_stage(
         ],
     });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("shellrs text pl"),
+        label: Some("termrs text pl"),
         bind_group_layouts: &[&layout],
         immediate_size: 0,
     });
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("shellrs text pipeline"),
+        label: Some("termrs text pipeline"),
         layout: Some(&pl),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -732,11 +732,11 @@ fn build_image_stage(
     premultiplied: bool,
 ) -> Stage {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("shellrs image"),
+        label: Some("termrs image"),
         source: wgpu::ShaderSource::Wgsl(IMAGE_WGSL.into()),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("shellrs image bgl"),
+        label: Some("termrs image bgl"),
         entries: &[
             texture_entry(0),
             sampler_entry(1),
@@ -753,12 +753,12 @@ fn build_image_stage(
         ],
     });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("shellrs image pl"),
+        label: Some("termrs image pl"),
         bind_group_layouts: &[&layout],
         immediate_size: 0,
     });
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("shellrs image pipeline"),
+        label: Some("termrs image pipeline"),
         layout: Some(&pl),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -795,16 +795,16 @@ fn build_braille_pipeline(
     premultiplied: bool,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("shellrs braille"),
+        label: Some("termrs braille"),
         source: wgpu::ShaderSource::Wgsl(BRAILLE_WGSL.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("shellrs braille pl"),
+        label: Some("termrs braille pl"),
         bind_group_layouts: &[],
         immediate_size: 0,
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("shellrs braille pipeline"),
+        label: Some("termrs braille pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,

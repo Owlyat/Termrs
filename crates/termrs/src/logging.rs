@@ -1,6 +1,6 @@
-//! File logger on the `log` facade: `shellrs::*` records at debug level,
+//! File logger on the `log` facade: `termrs::*` records at debug level,
 //! third-party crates at warn, so GPU shader chatter never buries our lines.
-//! Active in debug builds or with `--debug`; the file is `shellrs.log` in
+//! Active in debug builds or with `--debug`; the file is `termrs.log` in
 //! the config directory (see `Config::log_path`).
 
 use std::fs::File;
@@ -15,7 +15,7 @@ struct FileLogger {
 
 impl log::Log for FileLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        let max = if metadata.target().starts_with("shellrs") {
+        let max = if metadata.target().starts_with("termrs") {
             log::LevelFilter::Debug
         } else {
             log::LevelFilter::Warn
@@ -52,7 +52,7 @@ impl log::Log for FileLogger {
 pub fn init(path: &std::path::Path) {
     static DONE: OnceLock<()> = OnceLock::new();
     if DONE.set(()).is_err() {
-        eprintln!("shellrs: logger already initialized");
+        eprintln!("termrs: logger already initialized");
         return;
     }
     install_panic_hook();
@@ -63,13 +63,13 @@ pub fn init(path: &std::path::Path) {
                 start: std::time::Instant::now(),
             }));
             if log::set_logger(logger).is_err() {
-                eprintln!("shellrs: logger already initialized");
+                eprintln!("termrs: logger already initialized");
             } else {
                 log::set_max_level(log::LevelFilter::Debug);
                 log::debug!("logging to {}", path.display());
             }
         }
-        Err(e) => eprintln!("shellrs: cannot open log {}: {e}", path.display()),
+        Err(e) => eprintln!("termrs: cannot open log {}: {e}", path.display()),
     }
 }
 
@@ -84,19 +84,19 @@ pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let bt = std::backtrace::Backtrace::force_capture();
         log::error!("PANIC: {info}\n{bt}");
-        eprintln!("shellrs panic: {info}");
+        eprintln!("termrs panic: {info}");
     }));
 }
 
 /// Ignore console Ctrl+C. A GUI app launched from a terminal (e.g. `cargo run`)
 /// shares that console, and a child process (an AI CLI, a shell) can deliver a
-/// console control event that would otherwise kill shellrs with
+/// console control event that would otherwise kill termrs with
 /// `STATUS_CONTROL_C_EXIT`. Close the window to quit instead.
 ///
 /// NOTE: this immunity is inherited by child processes at spawn time, which
 /// would make them ignore Ctrl+C too. `pty.rs` therefore clears it across
 /// `spawn_command` and re-arms it right after, so shells/servers get normal
-/// handling while shellrs itself stays immune.
+/// handling while termrs itself stays immune.
 pub fn install_console_guard() {
     #[cfg(windows)]
     {
@@ -105,7 +105,7 @@ pub fn install_console_guard() {
         // Ctrl+C while children still receive it.
         let ok = unsafe { SetConsoleCtrlHandler(None, 1) };
         if ok == 0 {
-            eprintln!("shellrs: could not install console ctrl+c guard");
+            eprintln!("termrs: could not install console ctrl+c guard");
         }
     }
 }

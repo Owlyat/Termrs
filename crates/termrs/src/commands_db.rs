@@ -169,7 +169,7 @@ mod tests {
     fn temp_db(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
         p.push(format!(
-            "shellrs-db-{tag}-{}-{}.db",
+            "termrs-db-{tag}-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

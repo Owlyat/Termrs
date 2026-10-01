@@ -1,15 +1,21 @@
 [workspace]
-members = ["crates/lp", "crates/kalk", "crates/piper"]
+members = [
+    "crates/lp",
+    "crates/kalk",
+    "crates/piper",
+    "crates/termrs-share-proto",
+    "crates/termrs-share-web",
+]
 resolver = "2"
 
 [package]
-name = "shellrs"
+name = "termrs"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "shellrs"
-path = "crates/shellrs/src/main.rs"
+name = "termrs"
+path = "crates/termrs/src/main.rs"
 
 [dependencies]
 ratatui = "0.30"
@@ -51,9 +57,24 @@ rust-mcp-sdk = { version = "1", default-features = false, features = ["server", 
 rust-mcp-axum = "1"
 async-trait = "0.1.92"
 base64 = "0.23.1"
+# P2P terminal sharing: iroh QUIC with hole punching/relay fallback.
+iroh = "1"
+iroh-tickets = "1"
+rand = "0.10"
+termrs-share-proto = { path = "crates/termrs-share-proto" }
 
 # Vendored to drop PSUEDOCONSOLE_INHERIT_CURSOR from CreatePseudoConsole:
 # upstream's flag makes every new ConPTY inherit the previous console's input
 # line, so panes start with the last command (e.g. Clink) already in the prompt.
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }
+
+# Size-optimized profile for the browser share client (wasm), built with
+# `cargo build -p termrs-share-web --profile wasm-release`.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

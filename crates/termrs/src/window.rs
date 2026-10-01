@@ -1,6 +1,6 @@
 //! Native window host: `winit` event loop + `ratatui-wgpu` backend.
 //!
-//! Shellrs renders itself into its own OS window (no external terminal).
+//! Termrs renders itself into its own OS window (no external terminal).
 //! Keyboard input arrives on the winit thread, is handed to a dedicated tokio
 //! worker over a crossbeam channel for translation, and comes back as a user
 //! event for the UI thread to apply. Each pane pumps its PTY on its own tokio
@@ -52,7 +52,7 @@ struct RawInput {
 }
 
 /// Owns the window, GPU terminal, and app state.
-pub struct ShellrsWindow {
+pub struct TermrsWindow {
     config: Config,
     layout_path: Option<std::path::PathBuf>,
     window: Option<Arc<Window>>,
@@ -101,7 +101,7 @@ fn mono_flag(path: &str) -> String {
     }
 }
 
-impl ShellrsWindow {
+impl TermrsWindow {
     /// Prepare the handler; the window itself is created in `resumed`.
     /// `selftest` makes the first resume render one frame and exit.
     pub fn with_selftest(
@@ -317,7 +317,7 @@ impl ShellrsWindow {
             return Ok(());
         }
         let attrs = Window::default_attributes()
-            .with_title("shellrs")
+            .with_title("termrs")
             .with_inner_size(LogicalSize::new(1280.0, 800.0))
             .with_decorations(self.config.window.decorations)
             .with_transparent(self.config.window.transparent);
@@ -342,7 +342,7 @@ impl ShellrsWindow {
 
         // Headless font check: boot the backend with this file instead of
         // the configured one (renders frames, prints ok/fail, exits).
-        if let Ok(test_font) = std::env::var("SHELLRS_SELFTEST_FONT") {
+        if let Ok(test_font) = std::env::var("TERMRS_SELFTEST_FONT") {
             log::info!("selftest font override: {test_font:?}");
             self.config.general.font = test_font;
         }
@@ -572,7 +572,7 @@ impl ShellrsWindow {
                     processor.set_backdrop(img.data, img.width, img.height, opacity);
                 }
                 Err(e) => {
-                    eprintln!("shellrs: background image {e}");
+                    eprintln!("termrs: background image {e}");
                     processor.set_backdrop(Vec::new(), 0, 0, 0.0);
                 }
             }
@@ -741,7 +741,7 @@ impl ShellrsWindow {
     }
 }
 
-impl ApplicationHandler<AppEvent> for ShellrsWindow {
+impl ApplicationHandler<AppEvent> for TermrsWindow {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(e) = self.init(event_loop) {
             log::error!("init failed: {e}");
@@ -751,31 +751,31 @@ impl ApplicationHandler<AppEvent> for ShellrsWindow {
         }
         if self.selftest {
             // Optional: validate the GPU image pass against a real file.
-            if let Ok(path) = std::env::var("SHELLRS_SELFTEST_IMAGE")
+            if let Ok(path) = std::env::var("TERMRS_SELFTEST_IMAGE")
                 && let Some(app) = self.app.as_mut() {
                     match crate::image_view::ImageView::open(&path) {
                         Ok(img) => {
                             println!(
-                                "shellrs: selftest image {} ({}x{})",
+                                "termrs: selftest image {} ({}x{})",
                                 path, img.dims.0, img.dims.1
                             );
                             app.set_image_for_test(img);
                         }
-                        Err(e) => eprintln!("shellrs: selftest image failed: {e}"),
+                        Err(e) => eprintln!("termrs: selftest image failed: {e}"),
                     }
                 }
             // Optional: exercise a live backend rebuild (zoom, then font) to
             // diagnose rebuild hangs/crashes without clicking through the UI.
-            if std::env::var("SHELLRS_SELFTEST_REBUILD").is_ok() {
+            if std::env::var("TERMRS_SELFTEST_REBUILD").is_ok() {
                 let size = self.config.general.font_size.max(6);
-                eprintln!("shellrs: selftest rebuild: zoom pass...");
+                eprintln!("termrs: selftest rebuild: zoom pass...");
                 self.apply_font_size(size);
-                eprintln!("shellrs: selftest rebuild: zoom pass done");
+                eprintln!("termrs: selftest rebuild: zoom pass done");
                 let fb = self.config.general.font_fallback.clone();
                 let font = self.config.general.font.clone();
-                eprintln!("shellrs: selftest rebuild: font pass...");
+                eprintln!("termrs: selftest rebuild: font pass...");
                 self.apply_font(&font, size, &fb);
-                eprintln!("shellrs: selftest rebuild: font pass done");
+                eprintln!("termrs: selftest rebuild: font pass done");
             }
             let outcome = self
                 .terminal
@@ -793,7 +793,7 @@ impl ApplicationHandler<AppEvent> for ShellrsWindow {
                 });
             match outcome {
                 Ok(size) => println!(
-                    "shellrs: selftest ok ({}x{} cells, {} panes, font {}px{})",
+                    "termrs: selftest ok ({}x{} cells, {} panes, font {}px{})",
                     size.width,
                     size.height,
                     self.app.as_ref().map(|a| a.ws().leaf_ids().len()).unwrap_or(0),
@@ -1010,7 +1010,7 @@ impl ApplicationHandler<AppEvent> for ShellrsWindow {
                     w.set_decorations(fresh.window.decorations);
                 }
             if fresh.window.transparent != self.config.window.transparent {
-                log::warn!("transparent changed; restart shellrs to apply");
+                log::warn!("transparent changed; restart termrs to apply");
                 if let Some(app) = self.app.as_mut() {
                     app.status = "transparent changed: restart to apply".into();
                 }
@@ -1082,14 +1082,14 @@ fn run_inner(
 ) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_name("shellrs-worker")
+        .thread_name("termrs-worker")
         .build()
         .map_err(|e| format!("tokio runtime: {e}"))?;
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .map_err(|e| format!("event loop: {e}"))?;
     let mut handler =
-        ShellrsWindow::with_selftest(config, layout_path, selftest, rt.handle().clone());
+        TermrsWindow::with_selftest(config, layout_path, selftest, rt.handle().clone());
     handler.server_addr = server_addr.map(|s| s.to_string());
     handler.proxy = Some(event_loop.create_proxy());
     event_loop

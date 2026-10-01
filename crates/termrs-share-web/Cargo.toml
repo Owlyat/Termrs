@@ -1,0 +1,24 @@
+[package]
+name = "termrs-share-web"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+termrs-share-proto = { path = "../termrs-share-proto" }
+
+# Browser (wasm32) only: iroh in the browser is relay-only, so keep the
+# default features off as advised by the iroh browser guide.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+iroh = { version = "1", default-features = false, features = ["tls-ring"] }
+iroh-tickets = "1"
+wasm-bindgen = "=0.2.122"
+wasm-bindgen-futures = "0.4"
+async-channel = "2"
+js-sys = "0.3"
+getrandom = { version = "0.4", features = ["wasm_js"] }
+console_error_panic_hook = "0.1"
+tracing = "0.1"
+tokio = { version = "1", default-features = false, features = ["io-util"] }

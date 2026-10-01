@@ -9,7 +9,7 @@
 //! The assistant works towards a goal: create a single shell command that
 //! satisfies the user's need. The first prompt states that goal plus the
 //! user's request — it does NOT dump the saved commands. Instead the model
-//! queries for context with ONE JSON object per turn, and shellrs runs the
+//! queries for context with ONE JSON object per turn, and termrs runs the
 //! query locally and feeds the result back:
 //!
 //! - `{"action":"db","query":"<keywords>","limit":10}` → saved commands match
@@ -62,7 +62,7 @@ fn already_asked(seen: &mut Vec<String>, sig: String) -> bool {
 /// instead of receiving every saved command up front. The model may never
 /// run commands: only `help` queries execute (as `<tool> /?` / `--help`),
 /// and the final answer is merely typed into the pane for confirmation.
-pub const PROBE_PROTOCOL: &str = "Goal: create a single shell command for the target shell (see the Target shell line) satisfying the user's need. You may first gather context with exactly ONE JSON object per turn: {\"action\":\"db\",\"query\":\"<keywords>\",\"limit\":10} searches the saved command database, or {\"action\":\"which\",\"tools\":[\"<name>\"]} to check whether a CLI tool is installed, or {\"action\":\"help\",\"tool\":\"<name>\"} to read a tool's usage (shellrs runs `<name> /?` on Windows or `<name> --help` elsewhere; the tool itself is NEVER executed, so interactive programs are safe). Each reply returns the query result; then continue or finish with {\"action\":\"answer\",\"command\":\"<single shell command>\"}. Alternatively give the final command as ```answer <command> ```. Rules: you cannot run commands, and shellrs will not run anything for you except help queries -- the ONLY command that ever runs is your final answer, typed into the pane for the user to confirm. Final answer must be one runnable shell line for the target shell satisfying the initial need; prefer a saved command verbatim when one fits.";
+pub const PROBE_PROTOCOL: &str = "Goal: create a single shell command for the target shell (see the Target shell line) satisfying the user's need. You may first gather context with exactly ONE JSON object per turn: {\"action\":\"db\",\"query\":\"<keywords>\",\"limit\":10} searches the saved command database, or {\"action\":\"which\",\"tools\":[\"<name>\"]} to check whether a CLI tool is installed, or {\"action\":\"help\",\"tool\":\"<name>\"} to read a tool's usage (termrs runs `<name> /?` on Windows or `<name> --help` elsewhere; the tool itself is NEVER executed, so interactive programs are safe). Each reply returns the query result; then continue or finish with {\"action\":\"answer\",\"command\":\"<single shell command>\"}. Alternatively give the final command as ```answer <command> ```. Rules: you cannot run commands, and termrs will not run anything for you except help queries -- the ONLY command that ever runs is your final answer, typed into the pane for the user to confirm. Final answer must be one runnable shell line for the target shell satisfying the initial need; prefer a saved command verbatim when one fits.";
 
  /// Ask the configured CLI, letting the model query the saved `saved`
 /// snapshot with `{"action":"db",...}` instead of receiving every command in
@@ -167,7 +167,7 @@ pub fn run_full(
             Probe::Denied => {
                 log::info!("ai exec denied (bare command, never run)");
                 conversation.push_str(
-                    "\nTOOL RESULT: REFUSED -- shellrs never runs commands for you. Only help queries execute (as `<tool> /?` on Windows or `<tool> --help` elsewhere). To learn a tool's usage use {\"action\":\"help\",\"tool\":\"<name>\"}. Answer with the final command; it will only be typed into the pane for the user to confirm.\n",
+                    "\nTOOL RESULT: REFUSED -- termrs never runs commands for you. Only help queries execute (as `<tool> /?` on Windows or `<tool> --help` elsewhere). To learn a tool's usage use {\"action\":\"help\",\"tool\":\"<name>\"}. Answer with the final command; it will only be typed into the pane for the user to confirm.\n",
                 );
             }
             Probe::Legacy => {
@@ -1140,7 +1140,7 @@ fn fix_program_path(line: &str) -> String {
 /// On Windows the line is passed with `raw_arg`: letting Rust quote the whole
 /// argument makes `cmd` misparse inner quotes, splitting `-p "a b c"` into
 /// separate arguments (the "invalid argument: are" failure). The child also
-/// gets its own process group and no console, so its Ctrl+C can't kill shellrs.
+/// gets its own process group and no console, so its Ctrl+C can't kill termrs.
 fn shell(command: &str) -> Command {
     #[cfg(windows)]
     {
@@ -1319,8 +1319,8 @@ mod tests {
     /// End-to-end: the runner spawns through the shell, reads, and extracts.
     #[test]
     fn runs_command_through_shell() {
-        let out = run("echo shellrs_ai_probe", "", "ignored").unwrap();
-        assert_eq!(out, "shellrs_ai_probe");
+        let out = run("echo termrs_ai_probe", "", "ignored").unwrap();
+        assert_eq!(out, "termrs_ai_probe");
     }
 
     /// A quoted argument with spaces must reach the program as ONE argument
@@ -1408,7 +1408,7 @@ mod tests {
     /// exists (Windows home paths like `PC MASTER RACE`).
     #[test]
     fn quotes_unquoted_program_path_with_spaces() {
-        let dir = std::env::temp_dir().join(format!("shellrs ai {}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("termrs ai {}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("tool.exe");
         std::fs::write(&exe, b"x").unwrap();
@@ -1763,7 +1763,7 @@ mod tests {
     #[test]
     fn startup_crash_retries_with_folded_prompt() {
         let flag = std::env::temp_dir().join(format!(
-            "shellrs-fold-retry-{}-{}.flag",
+            "termrs-fold-retry-{}-{}.flag",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

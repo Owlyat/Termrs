@@ -1,4 +1,4 @@
-//! HTTP server: remote control for shellrs via REST API.
+//! HTTP server: remote control for termrs via REST API.
 //!
 //! Endpoints:
 //!   POST /key       — send a key press to the focused pane

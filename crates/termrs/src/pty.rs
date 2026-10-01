@@ -82,6 +82,10 @@ pub struct Pane {
     /// Status line for a pane-scoped MCP server (see `crate::mcp`), shown at
     /// the top of the pane while the server runs. `None` for normal panes.
     pub mcp_status: Option<String>,
+    /// Status line for an active share session (see `crate::share`).
+    pub share_status: Option<String>,
+    /// When set, raw PTY output is also broadcast here (to share viewers).
+    share_out: Option<tokio::sync::broadcast::Sender<Vec<u8>>>,
 }
 
 /// How the child shell spells a "print my cwd" command.
@@ -93,7 +97,7 @@ enum ShellKind {
 }
 
 /// Marker printed around the cwd so it can be parsed out of the output.
-const CWD_MARK: &str = "SHELLRS_CWD:";
+const CWD_MARK: &str = "TERMRS_CWD:";
 
 /// Cap on retained plain-text output per pane (~a few thousand lines).
 const CAPTURE_CAP: usize = 512 * 1024;
@@ -130,7 +134,7 @@ const WIN32_INPUT_OFF: &[u8] = b"\x1b[?9001l";
 /// Longest sequence is `WIN32_INPUT_ON` (8 bytes); keep a little more.
 const QUERY_TAIL_KEEP: usize = 12;
 
-/// Toggle shellrs's own Ctrl+C immunity (see `install_console_guard`).
+/// Toggle termrs's own Ctrl+C immunity (see `install_console_guard`).
 #[cfg(windows)]
 fn set_ctrlc_ignored(ignored: bool) {
     use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
@@ -139,10 +143,10 @@ fn set_ctrlc_ignored(ignored: bool) {
     }
 }
 
-/// Spawn the shell without passing on shellrs's Ctrl+C immunity.
+/// Spawn the shell without passing on termrs's Ctrl+C immunity.
 ///
 /// `SetConsoleCtrlHandler(NULL, TRUE)` (our startup guard so a child's
-/// console event cannot kill shellrs) is *inherited* by child processes. A
+/// console event cannot kill termrs) is *inherited* by child processes. A
 /// shell spawned while immunity is on keeps ignoring `CTRL_C_EVENT`, and so
 /// does everything it launches -- including a `cargo run` server, which then
 /// survives Ctrl+C. Interactive TUIs that read `0x03` from stdin (opencode)
@@ -150,7 +154,7 @@ fn set_ctrlc_ignored(ignored: bool) {
 ///
 /// Clearing immunity for the duration of `spawn_command` (re-armed right
 /// after, on both success and failure) gives the new shell normal Ctrl+C
-/// handling while shellrs itself stays immune.
+/// handling while termrs itself stays immune.
 #[cfg(windows)]
 fn spawn_without_ctrlc_inherit(
     slave: &(dyn portable_pty::SlavePty + Send),
@@ -330,6 +334,8 @@ impl Pane {
             last_out: std::time::Instant::now(),
             win32_input_mode: false,
             mcp_status: None,
+            share_status: None,
+            share_out: None,
         })
     }
 
@@ -341,12 +347,16 @@ impl Pane {
             n += chunk.raw.len();
             self.answer_queries(&chunk.raw);
             self.record_output(&chunk.text, chunk.marks, &chunk.osc7);
+            // Mirror raw output to share viewers (if any) before parsing.
+            if let Some(tx) = &self.share_out {
+                let _ = tx.send(chunk.raw.clone());
+            }
             self.parser.process(&chunk.raw);
         }
         if !self.dead
             && let Ok(Some(_)) = self.child.try_wait() {
                 self.dead = true;
-                self.parser.process(b"\r\n[shellrs] shell exited\r\n");
+                self.parser.process(b"\r\n[termrs] shell exited\r\n");
             }
         n
     }
@@ -592,7 +602,7 @@ impl Pane {
     /// child's, generate the event for process group 0 (everyone attached
     /// there), then detach and re-attach to our parent console when there is
     /// one. Our own process ignores Ctrl+C (see `install_console_guard`), so
-    /// generating the event cannot kill shellrs itself.
+    /// generating the event cannot kill termrs itself.
     #[cfg(windows)]
     fn send_ctrl_c_event(&self) {
         use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
@@ -864,6 +874,12 @@ impl Pane {
     /// Current emulated screen (read-only for renderer).
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
+    }
+
+    /// Install (or clear) the broadcast sink raw PTY output is mirrored to for
+    /// share viewers. See [`crate::share`].
+    pub fn set_share_out(&mut self, tx: Option<tokio::sync::broadcast::Sender<Vec<u8>>>) {
+        self.share_out = tx;
     }
 
     /// Feed bytes straight into the parser (tests only).
@@ -1365,11 +1381,11 @@ mod tests {
             pane.poll();
             std::thread::sleep(Duration::from_millis(25));
         }
-        pane.write(b"echo shellrs_probe\r");
+        pane.write(b"echo termrs_probe\r");
         let mut seen = false;
         for _ in 0..200 {
             pane.poll();
-            if pane.screen().contents().contains("shellrs_probe") {
+            if pane.screen().contents().contains("termrs_probe") {
                 seen = true;
                 break;
             }
@@ -1382,7 +1398,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "shellrs-pty-{tag}-{}-{}",
+            "termrs-pty-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1465,9 +1481,9 @@ mod tests {
             .unwrap();
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let mut pane = Pane::spawn(0, "", 200, rt.handle(), &wake).expect("spawn");
-        pane.parse_cwd("echo SHELLRS_CWD:%CD%\r\n");
+        pane.parse_cwd("echo TERMRS_CWD:%CD%\r\n");
         assert_eq!(pane.cwd(), std::env::current_dir().unwrap().as_path());
-        pane.parse_cwd("SHELLRS_CWD:C:\\Users\\me\\project\r\n");
+        pane.parse_cwd("TERMRS_CWD:C:\\Users\\me\\project\r\n");
         assert_eq!(pane.cwd(), std::path::Path::new("C:\\Users\\me\\project"));
         pane.kill();
         rt.shutdown_background();
@@ -1485,7 +1501,7 @@ mod tests {
         let (wake, _rx) = crossbeam_channel::unbounded::<()>();
         let mut pane = Pane::spawn(0, "", 200, rt.handle(), &wake).expect("spawn");
         let base = std::env::temp_dir().join(format!(
-            "shellrs-prompt-cwd-{}-{}",
+            "termrs-prompt-cwd-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1521,7 +1537,7 @@ mod tests {
 
         // Gone dirs, bare markers and ordinary output are ignored.
         let seq = pane.cwd_seq();
-        pane.feed_text_for_test("Z:\\definitely-missing-shellrs>\r\n", &[]);
+        pane.feed_text_for_test("Z:\\definitely-missing-termrs>\r\n", &[]);
         pane.feed_text_for_test(">\r\n$\r\nsee you later>\r\n", &[]);
         pane.feed_text_for_test("", &[std::path::PathBuf::from("Z:\\missing-too")]);
         assert_eq!(pane.cwd(), dir_a.as_path());
