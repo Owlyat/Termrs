@@ -667,7 +667,7 @@ fn default_share_code_len() -> usize {
 
 /// Public URL of the termrs share page (GitHub Pages).
 fn default_share_page_url() -> String {
-    "https://Owlyat.github.io/termrs/".into()
+    "https://Owlyat.github.io/Termrs/".into()
 }
 
 impl Default for Share {
@@ -1059,12 +1059,12 @@ mod tests {
         assert_eq!(cfg.share.code_len, 10);
         // Absent section keeps defaults.
         let cfg: Config = toml::from_str("[keys]\nquit = \"alt+q\"\n").unwrap();
-        assert_eq!(cfg.share.page_url, "https://Owlyat.github.io/termrs/");
+        assert_eq!(cfg.share.page_url, "https://Owlyat.github.io/Termrs/");
         assert!(cfg.share.allow_control);
         assert_eq!(cfg.share.code_len, 6);
         // A `[share]` section without page_url also gets the default URL.
         let cfg: Config = toml::from_str("[share]\nallow_control = true\n").unwrap();
-        assert_eq!(cfg.share.page_url, "https://Owlyat.github.io/termrs/");
+        assert_eq!(cfg.share.page_url, "https://Owlyat.github.io/Termrs/");
     }
 
     /// The `.config` home is the canonical config location and the first
