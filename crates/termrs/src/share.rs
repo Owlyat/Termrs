@@ -192,6 +192,10 @@ pub fn start(
                 return;
             }
         };
+        // `bind()` returns before a home relay is chosen; wait until we are
+        // online so the ticket carries a relay URL. Browsers are relay-only,
+        // so without this they cannot dial the endpoint.
+        endpoint.online().await;
         let ticket = EndpointTicket::new(endpoint.addr()).to_string();
         let router = Router::builder(endpoint)
             .accept(ALPN, handler)
@@ -202,7 +206,7 @@ pub fn start(
         log::info!("share pane {pane_id}: endpoint closed");
     });
 
-    match ready_rx.recv_timeout(Duration::from_secs(15)) {
+    match ready_rx.recv_timeout(Duration::from_secs(30)) {
         Ok(Ok(ticket)) => {
             let link = build_link(page_url, &ticket, &code);
             Ok(ShareSession {
@@ -401,5 +405,98 @@ mod tests {
             "https://x/##ticket=TICKET&code=AB12"
         );
         assert_eq!(build_link("", "TICKET", "AB12"), "TICKET");
+    }
+
+    /// Real iroh round-trip: a client dials the ticket, gets the snapshot and
+    /// its input reaches the host. Needs network (n0 relays); run with
+    /// `cargo test -p termrs end_to_end_share -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "requires network (n0 relays)"]
+    fn end_to_end_share() {
+        use std::str::FromStr;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use termrs_share_proto::Hello;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // Stand-in UI thread: answers snapshot/input queries.
+        let (query_tx, query_rx) = crossbeam_channel::unbounded::<ShareQuery>();
+        let got_input = Arc::new(AtomicBool::new(false));
+        let got_input2 = got_input.clone();
+        let responder = std::thread::spawn(move || {
+            while let Ok(q) = query_rx.recv() {
+                let reply = match q.kind {
+                    ShareQueryKind::Snapshot { .. } => ShareReply::Bytes(b"SNAP".to_vec()),
+                    ShareQueryKind::Input(b) => {
+                        if b == b"typing" {
+                            got_input2.store(true, Ordering::SeqCst);
+                        }
+                        ShareReply::Ok
+                    }
+                };
+                let _ = q.reply.send(reply);
+            }
+        });
+
+        let session = rt.block_on(async {
+            let session = start(rt.handle(), query_tx, 1, "CODE".into(), "https://page/", true)
+                .expect("share starts");
+
+            // The ticket must carry a relay address, or browsers (which are
+            // relay-only) cannot dial the endpoint.
+            let ticket = EndpointTicket::from_str(&session.ticket).expect("ticket parses");
+            assert!(
+                ticket.endpoint_addr().addrs.iter().any(|a| a.is_relay()),
+                "ticket has no relay address: {ticket:?}"
+            );
+
+            // Dial as a viewer.
+            let client = Endpoint::builder(presets::N0)
+                .bind()
+                .await
+                .expect("client binds");
+            client.online().await;
+            let conn = client
+                .connect(ticket.endpoint_addr().clone(), ALPN)
+                .await
+                .expect("connects to host");
+            let (mut send, mut recv) = conn.open_bi().await.expect("opens bi stream");
+            write_frame(
+                &mut send,
+                &Frame::Hello(Hello {
+                    mode: Mode::Control,
+                    cols: 80,
+                    rows: 24,
+                    code: "CODE".into(),
+                }),
+            )
+            .await
+            .expect("sends hello");
+
+            match read_frame(&mut recv).await.expect("reads frame") {
+                Frame::Snapshot(b) => assert_eq!(b, b"SNAP"),
+                other => panic!("expected snapshot, got {other:?}"),
+            }
+
+            write_frame(&mut send, &Frame::Input(b"typing".to_vec()))
+                .await
+                .expect("sends input");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(
+                got_input.load(Ordering::SeqCst),
+                "host did not receive the viewer's input"
+            );
+
+            conn.close(0u8.into(), b"done");
+            session
+        });
+
+        drop(session);
+        drop(responder);
+        rt.shutdown_background();
     }
 }

@@ -84,7 +84,8 @@ impl Hello {
     }
 
     fn decode(payload: &[u8]) -> Result<Self, ProtoError> {
-        if payload.len() < 7 {
+        // version + mode + cols(2) + rows(2) + code_len(2) = 8 bytes minimum.
+        if payload.len() < 8 {
             return Err(ProtoError::Short);
         }
         let version = payload[0];

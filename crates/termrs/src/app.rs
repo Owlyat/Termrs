@@ -6834,6 +6834,31 @@ mod tests {
         rt.shutdown_background();
     }
 
+    /// The palette must offer the terminal-sharing commands (regression: they
+    /// were added to `Command::ALL` and must be reachable via ctrl+p).
+    #[test]
+    fn palette_offers_share_commands() {
+        let mut p = Palette::new();
+        let labels: Vec<&str> = p.results.iter().map(|i| i.label).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("Share terminal")),
+            "palette missing Share terminal: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("Stop sharing")),
+            "palette missing Stop sharing: {labels:?}"
+        );
+        // Fuzzy search for "share" finds it.
+        for c in "share".chars() {
+            p.push_char(c);
+        }
+        assert!(
+            p.results.iter().any(|i| i.label.contains("Share terminal")),
+            "typing 'share' does not match: {:?}",
+            p.results.iter().map(|i| i.label).collect::<Vec<_>>()
+        );
+    }
+
     /// Typing fuzzy-filters the palette; the query is editable.
     #[test]
     fn palette_fuzzy_filters_by_typing() {
