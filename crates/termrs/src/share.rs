@@ -499,4 +499,82 @@ mod tests {
         drop(responder);
         rt.shutdown_background();
     }
+
+    /// Diagnostic: dial a live share ticket and report what the host sends.
+    /// Run with:
+    /// `TERMRS_TICKET=<ticket> TERMRS_CODE=<code> cargo test -p termrs dial_shared_ticket -- --ignored --nocapture`
+    #[test]
+    #[ignore = "diagnostic; needs a live host and its ticket"]
+    fn dial_shared_ticket() {
+        use std::str::FromStr;
+        use termrs_share_proto::Hello;
+
+        let ticket_str = std::env::var("TERMRS_TICKET").expect("set TERMRS_TICKET");
+        let code = std::env::var("TERMRS_CODE").unwrap_or_default();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let ticket = match EndpointTicket::from_str(&ticket_str) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("TICKET PARSE FAILED: {e}");
+                    return;
+                }
+            };
+            eprintln!("endpoint id: {}", ticket.endpoint_addr().id);
+            for a in &ticket.endpoint_addr().addrs {
+                eprintln!("addr: {a:?}  relay={}", a.is_relay());
+            }
+            let client = match Endpoint::builder(presets::N0).bind().await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("CLIENT BIND FAILED: {e}");
+                    return;
+                }
+            };
+            client.online().await;
+            eprintln!("client online; dialing host…");
+            let conn = match client
+                .connect(ticket.endpoint_addr().clone(), ALPN)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("CONNECT FAILED: {e}");
+                    return;
+                }
+            };
+            eprintln!("CONNECTED");
+            let (mut send, mut recv) = conn.open_bi().await.expect("open_bi");
+            write_frame(
+                &mut send,
+                &Frame::Hello(Hello {
+                    mode: Mode::Control,
+                    cols: 80,
+                    rows: 24,
+                    code,
+                }),
+            )
+            .await
+            .expect("hello");
+            for _ in 0..3 {
+                match read_frame(&mut recv).await {
+                    Ok(Frame::Snapshot(b)) => {
+                        eprintln!("SNAPSHOT {} bytes: {:?}", b.len(), &b[..b.len().min(80)]);
+                    }
+                    Ok(Frame::Output(b)) => eprintln!("OUTPUT {} bytes", b.len()),
+                    Ok(Frame::Error(e)) => eprintln!("HOST ERROR: {e}"),
+                    Ok(other) => eprintln!("FRAME: {other:?}"),
+                    Err(e) => {
+                        eprintln!("READ ENDED: {e}");
+                        break;
+                    }
+                }
+            }
+            conn.close(0u8.into(), b"done");
+        });
+        rt.shutdown_background();
+    }
 }

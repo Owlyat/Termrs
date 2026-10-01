@@ -9,9 +9,6 @@ const codeInput = $("code");
 
 // A share link looks like `https://page/#ticket=<ticket>&code=<code>`.
 const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-ticketInput.value = params.get("ticket") || "";
-codeInput.value = params.get("code") || "";
-if (ticketInput.value) dialog.close();
 
 const term = new window.Terminal({
   cursorBlink: true,
@@ -32,14 +29,7 @@ function setStatus(text) {
   statusEl.textContent = text;
 }
 
-document.querySelector("#join form").addEventListener("submit", async () => {
-  const ticket = ticketInput.value.trim();
-  const code = codeInput.value.trim();
-  if (!ticket) {
-    setStatus("a ticket is required");
-    return;
-  }
-  dialog.close();
+async function connect(ticket, code) {
   try {
     setStatus("loading iroh (wasm)…");
     const mod = await import("./wasm/termrs_share_web.js");
@@ -62,7 +52,27 @@ document.querySelector("#join form").addEventListener("submit", async () => {
     setStatus("failed: " + err);
     dialog.showModal();
   }
+}
+
+document.querySelector("#join form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const ticket = ticketInput.value.trim();
+  const code = codeInput.value.trim();
+  if (!ticket) {
+    setStatus("a ticket is required");
+    return;
+  }
+  dialog.close();
+  connect(ticket, code);
 });
+
+// Prefill from a share link and connect immediately (no click needed).
+ticketInput.value = params.get("ticket") || "";
+codeInput.value = params.get("code") || "";
+if (ticketInput.value) {
+  dialog.close();
+  connect(ticketInput.value.trim(), codeInput.value.trim());
+}
 
 window.addEventListener("beforeunload", () => {
   if (client) client.close();
