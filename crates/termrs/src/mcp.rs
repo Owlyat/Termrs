@@ -43,7 +43,11 @@ pub struct McpQuery {
 /// What the tool wants the pane to do.
 pub enum McpQueryKind {
     Run(String),
-    Key { key: String, modifier: Option<String> },
+    Key {
+        key: String,
+        modifier: Option<String>,
+        times: u32,
+    },
     Mouse {
         col: u16,
         row: u16,
@@ -188,7 +192,8 @@ pub fn start_pane_mcp(
                 "This server controls ONE terminal pane of the termrs app. Use \
                  termrs_run_command to execute shell commands and read their output, \
                  termrs_press_key, termrs_mouse_click and termrs_mouse_drag to drive \
-                 interactive programs, termrs_get_screen to inspect the current terminal, and \
+                 interactive programs, termrs_get_screen to inspect the current terminal, \
+                 termrs_wait_screen to hang until the screen changes, and \
                  termrs_screenshot for an image of the pane. There is deliberately no \
                  tool to close the app."
                     .into(),
@@ -310,6 +315,7 @@ impl ServerHandler for PaneMcpHandler {
                     _ => Err(CallToolError::from_message("pane returned no info")),
                 }
             }
+            PaneTools::WaitScreenTool(t) => wait_screen(&self.shared, t).await,
         }
     }
 }
@@ -365,15 +371,54 @@ async fn press_key(
     shared: &McpShared,
     tool: PressKeyTool,
 ) -> Result<CallToolResult, CallToolError> {
+    let times = tool.times.unwrap_or(1).clamp(1, 100);
+    let ok = if times == 1 {
+        "key sent".to_string()
+    } else {
+        format!("key sent x{times}")
+    };
     simple(
         shared,
         McpQueryKind::Key {
             key: tool.key,
             modifier: tool.modifier,
+            times,
         },
-        "key sent",
+        &ok,
     )
     .await
+}
+
+/// Capture the screen, then hang until it differs (or timeout).
+/// Polls on the MCP task so the UI thread stays responsive.
+async fn wait_screen(
+    shared: &McpShared,
+    tool: WaitScreenTool,
+) -> Result<CallToolResult, CallToolError> {
+    let timeout = Duration::from_millis(tool.timeout_ms.unwrap_or(15_000).clamp(100, 120_000));
+    let interval = Duration::from_millis(tool.interval_ms.unwrap_or(250).clamp(50, 5_000));
+    let before = match ask(shared, McpQueryKind::Screen).await? {
+        McpReply::Text(text) => text,
+        McpReply::Err(e) => return Err(CallToolError::from_message(e)),
+        _ => return Err(CallToolError::from_message("pane returned no text")),
+    };
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() >= timeout {
+            return Err(CallToolError::from_message(format!(
+                "timed out after {}ms, screen unchanged",
+                timeout.as_millis()
+            )));
+        }
+        tokio::time::sleep(interval).await;
+        match ask(shared, McpQueryKind::Screen).await? {
+            McpReply::Text(now) if now != before => {
+                return Ok(CallToolResult::text_content(vec![TextContent::from(now)]));
+            }
+            McpReply::Err(e) => return Err(CallToolError::from_message(e)),
+            _ => {}
+        }
+    }
 }
 
 /// Parse a tool's `button` argument (defaults to left).
@@ -458,7 +503,8 @@ pub struct RunCommandTool {
     title = "Press a key in the pane",
     description = "Send a single key press to the pane, e.g. for interactive programs. \
                    `key` is one of Enter, Escape, Backspace, Tab, Up, Down, Left, Right, \
-                   Home, End, PageUp, PageDown, Delete, Insert, F1..F12, or one character.",
+                   Home, End, PageUp, PageDown, Delete, Insert, F1..F12, or one character. \
+                   `times` repeats the press (1-100, default 1), e.g. Down x4.",
     destructive_hint = true
 )]
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
@@ -468,6 +514,9 @@ pub struct PressKeyTool {
     /// Optional modifier containing any of Ctrl, Alt, Shift.
     #[serde(default)]
     pub modifier: Option<String>,
+    /// How many times to press the key (1-100, default 1).
+    #[serde(default)]
+    pub times: Option<u32>,
 }
 
 #[mcp_tool(
@@ -559,6 +608,24 @@ pub struct ScreenshotTool {}
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema, Default)]
 pub struct PaneInfoTool {}
 
+#[mcp_tool(
+    name = "termrs_wait_screen",
+    title = "Wait for the screen to change",
+    description = "Capture the current screen text, then hang until it differs and return \
+                   the new text. Times out with an error if nothing changes in `timeout_ms` \
+                   (default 15000, max 120000). Polls every `interval_ms` (default 250).",
+    read_only_hint = true
+)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
+pub struct WaitScreenTool {
+    /// Max milliseconds to wait (100-120000, default 15000).
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Poll interval in milliseconds (50-5000, default 250).
+    #[serde(default)]
+    pub interval_ms: Option<u64>,
+}
+
 // The generated enum mirrors the tool structs, so every variant shares the
 // `Tool` suffix; that is intentional here (allowed at module level).
 tool_box!(
@@ -571,7 +638,8 @@ tool_box!(
         InterruptTool,
         GetScreenTool,
         ScreenshotTool,
-        PaneInfoTool
+        PaneInfoTool,
+        WaitScreenTool
     ]
 );
 
@@ -702,7 +770,7 @@ mod tests {
         .to_string();
         let _ = post_rpc(&url, &ready, Some(&session));
 
-        // tools/list -> all six tools.
+        // tools/list -> all tools.
         let list = serde_json::json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
         })
@@ -717,6 +785,7 @@ mod tests {
             "termrs_get_screen",
             "termrs_screenshot",
             "termrs_pane_info",
+            "termrs_wait_screen",
         ] {
             assert!(list_body.contains(tool), "tools/list missing {tool}: {list_body}");
         }
@@ -772,6 +841,121 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         let _ = responder.join();
         drop(server);
+    }
+
+    /// `termrs_wait_screen` times out with an error when the screen never
+    /// changes (mock always returns the same text).
+    #[test]
+    fn wait_screen_times_out_when_unchanged() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let server = start_pane_mcp(rt.handle(), tx, 7, 0).expect("server starts");
+        let url = format!("http://127.0.0.1:{}/mcp", server.port);
+
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let responder = spawn_responder(rx, stop.clone());
+
+        let init = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "termrs-test", "version": "0.0" }
+            }
+        })
+        .to_string();
+        let (_, session) = post_rpc(&url, &init, None);
+        let session = session.expect("initialize returned a session id");
+        let ready = serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized"
+        })
+        .to_string();
+        let _ = post_rpc(&url, &ready, Some(&session));
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {
+                "name": "termrs_wait_screen",
+                "arguments": { "timeout_ms": 300, "interval_ms": 50 }
+            }
+        })
+        .to_string();
+        let (resp, _) = post_rpc(&url, &body, Some(&session));
+        assert!(
+            resp.contains("timed out") && resp.contains("screen unchanged"),
+            "wait_screen timeout: {resp}"
+        );
+
+        stop.store(true, Ordering::Relaxed);
+        let _ = responder.join();
+        drop(server);
+    }
+
+    /// `termrs_wait_screen` returns the new text as soon as the screen differs.
+    #[test]
+    fn wait_screen_returns_on_change() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let server = start_pane_mcp(rt.handle(), tx, 7, 0).expect("server starts");
+        let url = format!("http://127.0.0.1:{}/mcp", server.port);
+
+        // Responder: first two screens identical, third differs.
+        let responder = std::thread::spawn(move || {
+            let mut n = 0;
+            while let Ok(q) = rx.recv_timeout(Duration::from_millis(5000)) {
+                let reply = match q.kind {
+                    McpQueryKind::Screen => {
+                        n += 1;
+                        if n < 3 {
+                            McpReply::Text("BEFORE".into())
+                        } else {
+                            McpReply::Text("AFTER".into())
+                        }
+                    }
+                    _ => McpReply::Ok,
+                };
+                let _ = q.reply.send(reply);
+            }
+        });
+
+        let init = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "termrs-test", "version": "0.0" }
+            }
+        })
+        .to_string();
+        let (_, session) = post_rpc(&url, &init, None);
+        let session = session.expect("initialize returned a session id");
+        let ready = serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized"
+        })
+        .to_string();
+        let _ = post_rpc(&url, &ready, Some(&session));
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {
+                "name": "termrs_wait_screen",
+                "arguments": { "timeout_ms": 5000, "interval_ms": 50 }
+            }
+        })
+        .to_string();
+        let (resp, _) = post_rpc(&url, &body, Some(&session));
+        assert!(resp.contains("AFTER"), "wait_screen change: {resp}");
+
+        drop(server);
+        let _ = responder.join();
     }
 }
 

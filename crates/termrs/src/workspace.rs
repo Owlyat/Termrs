@@ -5,12 +5,24 @@
 //! per-workspace status (alive panes, finished shells, last tool result).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crossbeam_channel::Sender;
 use ratatui::layout::Rect;
 
 use crate::layout::TreeLayout;
 use crate::pty::Pane;
+
+/// Process-wide pane id allocator. Pane ids used to be per-workspace
+/// (`0, 1, ...` in every workspace), so any lookup by bare id
+/// (`find_pane`, MCP/share maps) always hit the first workspace.
+/// Allocating globally keeps every pane id unique across workspaces.
+static NEXT_PANE_ID: AtomicUsize = AtomicUsize::new(0);
+
+/// Allocate a pane id that is unique across all workspaces.
+pub(crate) fn alloc_pane_id() -> usize {
+    NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Horizontal = stacked top/bottom; Vertical = side-by-side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,11 +148,13 @@ impl Node {
     }
 
     /// Rebuild a tree from its saved shape, spawning one pane per leaf with
-    /// ids `next_id..` (returned alongside the tree). Each leaf pumps on its
-    /// own tokio blocking thread via `rt`. Leaves consume `dirs` in visual
-    /// order (same order as [`Node::leaves`]): each pane starts in its saved
-    /// directory, falling back to the process directory when the entry is
-    /// missing or gone (`spawn_in` handles that).
+    /// globally unique ids (see [`alloc_pane_id`]). `next_id` only tracks a
+    /// high-water mark for compatibility; the id itself always comes from the
+    /// global allocator so restores never collide across workspaces. Each leaf
+    /// pumps on its own tokio blocking thread via `rt`. Leaves consume `dirs`
+    /// in visual order (same order as [`Node::leaves`]): each pane starts in
+    /// its saved directory, falling back to the process directory when the
+    /// entry is missing or gone (`spawn_in` handles that).
     #[allow(clippy::too_many_arguments)] // recursive builder threading spawn context
     fn from_layout(
         layout: &TreeLayout,
@@ -155,8 +169,8 @@ impl Node {
     ) -> Result<Node, String> {
         match layout {
             TreeLayout::Pane => {
-                let id = *next_id;
-                *next_id += 1;
+                let id = alloc_pane_id();
+                *next_id = (*next_id).max(id.wrapping_add(1));
                 let cwd = dirs.get(*dir_idx).cloned().unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
                 });
@@ -186,6 +200,8 @@ pub struct Workspace {
     panes: Vec<Pane>,
     root: Option<Node>,
     pub focused: usize,
+    /// High-water mark for pane ids (actual allocation is global via
+    /// [`alloc_pane_id`]; this only tracks compatibility).
     next_id: usize,
     /// Last finished thing: tool result or exited shell. Shown in inbox.
     pub last_done: String,
@@ -206,12 +222,20 @@ pub struct Workspace {
     /// area and the split tree is hidden (but kept, so unzoom restores it).
     /// View state only: never persisted to the layout file.
     zoomed: Option<usize>,
+    /// Monotonic focus clock + last-seen tick per pane. Directional focus
+    /// is geometry-first, but ties (e.g. two stacked panes west of a full
+    /// height pane) break toward the most recently focused candidate so
+    /// Right-then-Left returns to where you came from.
+    focus_seq: u64,
+    last_seen: HashMap<usize, u64>,
     /// Nudges the UI thread whenever a pane delivers output.
     wake: Sender<()>,
 }
 
 impl Workspace {
     /// Boot workspace with a single pane (its reader gets a tokio thread).
+    /// The pane id is globally unique (see [`alloc_pane_id`]) so lookups by
+    /// bare id never collide with another workspace's pane `0`.
     pub fn new(
         name: String,
         shell: &str,
@@ -219,19 +243,22 @@ impl Workspace {
         rt: &tokio::runtime::Handle,
         wake: &Sender<()>,
     ) -> Result<Self, String> {
-        let pane = Pane::spawn(0, shell, scrollback, rt, wake)?;
+        let id = alloc_pane_id();
+        let pane = Pane::spawn(id, shell, scrollback, rt, wake)?;
         Ok(Self {
             name,
             panes: vec![pane],
-            root: Some(Node::Pane(0)),
-            focused: 0,
-            next_id: 1,
+            root: Some(Node::Pane(id)),
+            focused: id,
+            next_id: id.wrapping_add(1),
             last_done: String::from("shell started"),
             activity: 0,
             seen: 0,
             rects: HashMap::new(),
             tiled: HashMap::new(),
             zoomed: None,
+            focus_seq: 1,
+            last_seen: HashMap::from([(id, 1)]),
             wake: wake.clone(),
         })
     }
@@ -271,6 +298,8 @@ impl Workspace {
             rects: HashMap::new(),
             tiled: HashMap::new(),
             zoomed: None,
+            focus_seq: 1,
+            last_seen: HashMap::from([(focused, 1)]),
             wake: wake.clone(),
         })
     }
@@ -377,7 +406,9 @@ impl Workspace {
     }
 
     /// Split focused leaf; returns new pane id (or error text). The new
-    /// shell starts in the focused pane's directory.
+    /// shell starts in the focused pane's directory. The id is globally
+    /// unique (see [`alloc_pane_id`]) so it never collides with another
+    /// workspace's pane.
     pub fn split(
         &mut self,
         dir: SplitDir,
@@ -388,8 +419,8 @@ impl Workspace {
         // A maximized pane hides the tree a split would extend: restore
         // first so the new pane is actually visible.
         self.zoomed = None;
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = alloc_pane_id();
+        self.next_id = self.next_id.max(id.wrapping_add(1));
         // The new shell starts where the focused one is (last known cwd;
         // spawn falls back to the process directory when it is gone).
         let cwd = self
@@ -416,6 +447,8 @@ impl Workspace {
             }
         }
         self.focused = id;
+        self.focus_seq = self.focus_seq.wrapping_add(1);
+        self.last_seen.insert(id, self.focus_seq);
         Ok(id)
     }
 
@@ -436,8 +469,10 @@ impl Workspace {
             return true;
         }
         self.panes.retain(|p| p.id != id);
+        self.last_seen.remove(&id);
         if self.focused == id {
-            self.focused = *self.leaf_ids().first().unwrap_or(&0);
+            let next = *self.leaf_ids().first().unwrap_or(&0);
+            self.set_focused(next);
         }
         false
     }
@@ -454,8 +489,9 @@ impl Workspace {
         } else {
             (pos + ids.len() - 1) % ids.len()
         };
-        self.focused = ids[next];
-        self.focused
+        let id = ids[next];
+        self.set_focused(id);
+        id
     }
 
     /// Maximized pane id, if the workspace is zoomed (ui gives it the whole
@@ -487,6 +523,13 @@ impl Workspace {
         } else {
             false
         }
+    }
+
+    /// Set focus + record recency for directional tie-breaks.
+    pub fn set_focused(&mut self, id: usize) {
+        self.focused = id;
+        self.focus_seq = self.focus_seq.wrapping_add(1);
+        self.last_seen.insert(id, self.focus_seq);
     }
 
     /// Refresh cached pane rects (called by ui after every layout).
@@ -530,15 +573,29 @@ impl Workspace {
         let from_zoom = self.unzoom();
         let map = if from_zoom { &self.tiled } else { &self.rects };
         let cur = *map.get(&self.focused)?;
-        let (best, _) = self
-            .leaf_ids()
-            .into_iter()
-            .filter(|&id| id != self.focused)
-            .filter_map(|id| map.get(&id).map(|r| (id, *r)))
-            .filter(|(_, r)| beyond(cur, *r, dir))
-            .map(|(id, r)| (id, score(cur, r, dir)))
-            .min_by(|a, b| a.1.cmp(&b.1))?;
-        self.focused = best;
+        let mut best: Option<(usize, (i32, i32), u64)> = None;
+        for id in self.leaf_ids() {
+            if id == self.focused {
+                continue;
+            }
+            let Some(r) = map.get(&id).copied() else {
+                continue;
+            };
+            if !beyond(cur, r, dir) {
+                continue;
+            }
+            let s = score(cur, r, dir);
+            let seen = self.last_seen.get(&id).copied().unwrap_or(0);
+            let better = match best {
+                None => true,
+                Some((_, bs, bseen)) => s < bs || (s == bs && seen > bseen),
+            };
+            if better {
+                best = Some((id, s, seen));
+            }
+        }
+        let (best, _, _) = best?;
+        self.set_focused(best);
         Some(best)
     }
 
@@ -609,13 +666,11 @@ fn resize_in(node: &mut Node, target: usize, dir: Direction, delta: f32) -> bool
     if !in_first && !contains(second, target) {
         return false;
     }
-    let grow_first = matches!(
-        (dir, in_first),
-        (Direction::Right, true)
-            | (Direction::Left, false)
-            | (Direction::Down, true)
-            | (Direction::Up, false)
-    );
+    // Border-move semantics: the shared border moves in `dir`.
+    // Right/Down -> first grows (ratio+), Left/Up -> second grows (ratio-),
+    // regardless of which side holds the focused pane. This makes
+    // rightmost+Left and bottom+Up grow the focused pane.
+    let grow_first = matches!(dir, Direction::Right | Direction::Down);
     *ratio = (*ratio + if grow_first { delta } else { -delta }).clamp(0.1, 0.9);
     true
 }
@@ -732,6 +787,8 @@ mod tests {
                 (1, Rect::new(40, 0, 40, 20)),
             ]),
             zoomed: None,
+            focus_seq: 1,
+            last_seen: HashMap::from([(0, 1)]),
             wake,
         };
         assert_eq!(ws.focus_direction(Direction::Right), Some(1));
@@ -768,6 +825,8 @@ mod tests {
             rects: HashMap::new(),
             tiled: HashMap::new(),
             zoomed: None,
+            focus_seq: 1,
+            last_seen: HashMap::from([(0, 1)]),
             wake: wake.clone(),
         };
         assert_eq!(ws.zoomed(), None);
@@ -800,6 +859,8 @@ mod tests {
             rects: HashMap::new(),
             tiled: HashMap::new(),
             zoomed: None,
+            focus_seq: 1,
+            last_seen: HashMap::from([(0, 1)]),
             wake,
         };
         assert_eq!(solo.toggle_zoom(), None);
@@ -834,6 +895,8 @@ mod tests {
             rects: HashMap::from([(0, Rect::new(0, 0, 80, 20))]),
             tiled,
             zoomed: Some(0),
+            focus_seq: 1,
+            last_seen: HashMap::from([(0, 1)]),
             wake,
         };
         // Right: restores and lands on pane 1.
@@ -874,6 +937,8 @@ mod tests {
                 (1, Rect::new(40, 0, 40, 20)),
             ]),
             zoomed: None,
+            focus_seq: 1,
+            last_seen: HashMap::from([(0, 1)]),
             wake,
         };
         assert_eq!(ws.pane_at(10, 5), Some(0));

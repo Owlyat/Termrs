@@ -1983,7 +1983,7 @@ impl App {
                 .into_iter()
                 .find(|&leaf| leaf != id);
             if let Some(s) = survivor {
-                self.workspaces[ws_idx].focused = s;
+                self.workspaces[ws_idx].set_focused(s);
             }
         }
         match self.close_delay_ms() {
@@ -2339,7 +2339,7 @@ impl App {
     fn find_pane_mut(&mut self, id: usize) -> Option<&mut crate::pty::Pane> {
         self.workspaces
             .iter_mut()
-            .find(|w| w.leaf_ids().contains(&id))
+            .find(|w| w.pane(id).is_some())
             .and_then(|w| w.pane_mut(id))
     }
 
@@ -2426,8 +2426,12 @@ impl App {
                 p.write(&bytes);
                 R::Ok
             }
-            K::Key { key, modifier } => {
-                self.mcp_press_key(pane_id, &key, modifier.as_deref());
+            K::Key {
+                key,
+                modifier,
+                times,
+            } => {
+                self.mcp_press_key(pane_id, &key, modifier.as_deref(), times);
                 R::Ok
             }
             K::Mouse {
@@ -2641,7 +2645,13 @@ impl App {
     }
 
     /// Press a named key in a specific pane (mirrors the HTTP `/key` path).
-    fn mcp_press_key(&mut self, pane_id: usize, key: &str, modifier: Option<&str>) {
+    fn mcp_press_key(
+        &mut self,
+        pane_id: usize,
+        key: &str,
+        modifier: Option<&str>,
+        times: u32,
+    ) {
         use crate::keys::{Key, KeyKind, KeyPress};
         let mods = Self::mcp_mods(modifier);
         let k = match key {
@@ -2679,13 +2689,15 @@ impl App {
         let Some(p) = self.find_pane_mut(pane_id) else {
             return;
         };
-        for kind in [KeyKind::Press, KeyKind::Release] {
-            p.write_key(&KeyPress {
-                key: k,
-                mods,
-                text: None,
-                kind,
-            });
+        for _ in 0..times.clamp(1, 100) {
+            for kind in [KeyKind::Press, KeyKind::Release] {
+                p.write_key(&KeyPress {
+                    key: k,
+                    mods,
+                    text: None,
+                    kind,
+                });
+            }
         }
     }
 
@@ -3660,7 +3672,7 @@ impl App {
             .into_iter()
             .find(|&id| id != target)
             .expect("another leaf exists");
-        self.ws_mut().focused = survivor;
+        self.ws_mut().set_focused(survivor);
         match self.close_delay_ms() {
             0 => {
                 self.ws_mut().remove_leaf(target);
@@ -4697,7 +4709,7 @@ impl App {
     pub fn focus_pane_at(&mut self, col: u16, row: u16) -> bool {
         if let Some(id) = self.ws().pane_at(col, row) {
             if id != self.ws().focused {
-                self.ws_mut().focused = id;
+                self.ws_mut().set_focused(id);
                 self.queue_fx(id, FxKind::Focus);
             }
             true
@@ -5551,7 +5563,8 @@ impl App {
                 self.current = self.workspaces.len() - 1;
                 self.ws_mut().mark_seen();
                 self.status = format!("workspace ws-{n}");
-                self.queue_fx(0, FxKind::Fresh);
+                let fid = self.ws().focused;
+                self.queue_fx(fid, FxKind::Fresh);
                 log::info!("new workspace ws-{n}");
             }
             Err(e) => self.status = format!("workspace failed: {e}"),
@@ -8391,6 +8404,87 @@ mod tests {
         assert!(
             screen.contains("mcp-probe-123"),
             "MCP screen did not contain the probe: {screen}"
+        );
+
+        for w in &mut app.workspaces {
+            w.kill_all();
+        }
+        let _ = std::fs::remove_file(&layout);
+        rt.shutdown_background();
+    }
+
+    /// Opening MCP in the current pane must target the current workspace's
+    /// focused pane, not the first workspace's same-numbered pane (pane ids
+    /// used to collide as `0` in every workspace).
+    #[test]
+    fn mcp_open_here_targets_current_workspace() {
+        let _guard = crate::pty::lock_pty_tests();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (wake, _rx) = crossbeam_channel::unbounded::<()>();
+        let layout = unique_temp_path("mcp-ws");
+        let mut cfg = Config::default();
+        cfg.general.mcp_port = 0;
+        let mut app = App::new(
+            cfg,
+            Some(layout.clone()),
+            rt.handle(),
+            &wake,
+            None,
+            None,
+            false,
+        )
+        .expect("app boots");
+        app.new_workspace();
+        assert_eq!(app.workspaces.len(), 2);
+        // Every live pane id must be unique across workspaces.
+        let mut all: Vec<usize> = app
+            .workspaces
+            .iter()
+            .flat_map(|w| w.leaf_ids())
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(
+            all.len(),
+            app.workspaces.iter().map(|w| w.leaf_ids().len()).sum::<usize>(),
+            "pane ids collide across workspaces: {:?}",
+            app.workspaces
+                .iter()
+                .map(|w| w.leaf_ids())
+                .collect::<Vec<_>>()
+        );
+
+        // Open MCP in the current (second) workspace's focused pane.
+        let current = app.current;
+        let focused = app.ws().focused;
+        assert!(
+            app.workspaces[current].leaf_ids().contains(&focused),
+            "focused pane must belong to current workspace"
+        );
+        app.open_mcp_pane(None);
+        assert!(
+            app.mcp_servers.contains_key(&focused),
+            "MCP server must be keyed by the current pane"
+        );
+        // The server's pane must resolve to the current workspace, and the
+        // status line must land on that pane (not workspace 0's pane).
+        let pane = app.find_pane(focused).expect("pane resolves");
+        let ws_idx = app
+            .workspaces
+            .iter()
+            .position(|w| w.pane(focused).is_some())
+            .expect("workspace resolves");
+        assert_eq!(ws_idx, current, "MCP pane resolved to wrong workspace");
+        assert!(
+            pane.mcp_status.is_some(),
+            "MCP status must be set on the current pane"
+        );
+        assert!(
+            app.workspaces[0].pane(focused).is_none() || current == 0,
+            "first workspace must not own the MCP pane"
         );
 
         for w in &mut app.workspaces {
