@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::workspace::{SplitDir, Workspace};
 
+// File order (§7-module-map §3): §2 `TreeLayout`/`LayoutFile` types → §4
+// `load`/`build` entries → §7 ratio/dir helpers.
+
 /// Split tree as stored on disk (no pane ids: they are reassigned on load).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TreeLayout {
@@ -157,5 +160,5 @@ impl LayoutFile {
 }
 
 #[cfg(test)]
-#[path = "test/layout_tests.rs"]
+#[path = "../test/layout_tests.rs"]
 mod tests;

@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
+// File order (§7-module-map §3): §2 `SavedCommand`/`CommandDb` types → §4
+// `open` entry → §5 query/bump commands → §7 row-mapping helpers.
+
 /// One saved command.
 #[derive(Debug, Clone)]
 pub struct SavedCommand {
@@ -36,7 +39,11 @@ impl CommandDb {
             }
         let conn =
             Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        // WAL failure is non-fatal (falls back to rollback journal with
+        // reduced crash durability), but must be visible, not silent.
+        if let Err(e) = conn.pragma_update(None, "journal_mode", "WAL") {
+            log::warn!("commands.db: WAL mode not enabled: {e}");
+        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS commands (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -163,5 +170,5 @@ pub fn fill(template: &str, values: &[(String, String)]) -> String {
 }
 
 #[cfg(test)]
-#[path = "test/commands_db_tests.rs"]
+#[path = "../test/commands_db_tests.rs"]
 mod tests;

@@ -13,6 +13,9 @@ struct FileLogger {
     start: std::time::Instant,
 }
 
+// File order (§7-module-map §3): §2 `FileLogger` → `log` dispatch (main
+// event path) → §4 `init` entry → §6 panic/console setup.
+
 impl log::Log for FileLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         let max = if metadata.target().starts_with("termrs") {
@@ -37,12 +40,16 @@ impl log::Log for FileLogger {
             record.args()
         );
         if let Ok(mut file) = self.file.lock() {
-            let _ = file.write_all(line.as_bytes());
+            // Self-sink: the logger cannot log to itself (infinite regress), so
+        // a failed write is dropped by design. Failures surface at init
+        // (`cannot open log`) instead.
+        let _ = file.write_all(line.as_bytes());
         }
     }
 
     fn flush(&self) {
         if let Ok(mut file) = self.file.lock() {
+            // Self-sink (see `log` above): dropped by design, never logged.
             let _ = file.flush();
         }
     }

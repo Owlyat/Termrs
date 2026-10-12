@@ -23,6 +23,10 @@ use ratatui_wgpu::wgpu::util::DeviceExt;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+// File order (§7-module-map §3): §2 `Dot`/processor types → §4 `process`
+// entry (backdrop→text→braille→overlay→cursor order is load-bearing) →
+// §7 NDC/upload helpers. Do not reorder the draw stages.
+
 /// One braille dot quad, in normalised device coordinates. Braille cells are
 /// drawn as geometry (see `ui::collect_braille`) instead of as a font glyph,
 /// because font braille glyphs only cover part of their cell and leave

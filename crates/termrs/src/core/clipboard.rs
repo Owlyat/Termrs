@@ -3,6 +3,8 @@
 //! Uses `arboard`; a headless or locked clipboard yields an `Err` the caller
 //! surfaces as a status line rather than a panic.
 
+// Two entries, no helpers: `copy` then `paste`.
+
 /// Copy `text` to the system clipboard.
 pub fn copy(text: &str) -> Result<(), String> {
     let mut clipboard =

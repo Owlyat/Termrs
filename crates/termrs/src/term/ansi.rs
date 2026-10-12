@@ -5,6 +5,9 @@
 //! It also records OSC 133 prompt markers, which shell integration emits,
 //! so callers can find where a command's output starts and ends.
 
+// File order (§7-module-map §3): §4 `strip_ansi_markers`/`extract_osc7_dirs`
+// entries → §7 escape-scanner helpers.
+
 /// Strip escape sequences from terminal output; `\r\n` and lone `\r`
 /// become `\n`, other control characters are dropped.
 pub fn strip_ansi_markers(input: &str) -> (String, Vec<usize>) {
@@ -185,5 +188,5 @@ fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars>) -> bool {
 }
 
 #[cfg(test)]
-#[path = "test/ansi_tests.rs"]
+#[path = "../test/ansi_tests.rs"]
 mod tests;

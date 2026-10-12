@@ -19,6 +19,13 @@ use crate::layout::LayoutFile;
 use crate::scrollback::ScrollbackView;
 use crate::workspace::{Direction, SplitDir, Workspace};
 
+// File order (see `Architecture/07-module-map.md` §3): §2 overlay/picker
+// public types → §4 `App` state → §5 constructor + main dispatch
+// (`handle_key`, pollers, mouse) → §6 secondary handlers → §7 helpers.
+// NOTE: the overlay types below predate the layout; the planned follow-up
+// is extracting them into `core/overlays.rs` with `pub use` re-exports so
+// `crate::app::Palette` keeps working and `App` moves to the top.
+
 /// Prompt kinds for the two text-input overlays (textarea editors).
 /// `kalk`, `lp` and `piper` are ordinary commands typed into a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -813,47 +820,6 @@ impl SelectMode {
     }
 }
 
-/// Build the shell command that opens `path` in `editor`, quoting for the
-/// platform shell so paths with spaces work.
-fn edit_invocation(editor: &str, path: &std::path::Path) -> String {
-    let shown = path.display();
-    if cfg!(windows) {
-        format!("{editor} \"{shown}\"")
-    } else {
-        format!("{editor} '{shown}'")
-    }
-}
-
-/// Word character for text objects (alphanumeric or underscore).
-fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
-
-/// True for a Ctrl+C keypress (any letter case, Shift tolerated): the shell's
-/// interrupt key. Alt/Super combos are different bindings and must not match.
-fn is_interrupt(ev: &KeyPress) -> bool {
-    if !ev.mods.contains(Mods::CONTROL) {
-        return false;
-    }
-    if ev.mods.contains(Mods::ALT) || ev.mods.contains(Mods::SUPER) {
-        return false;
-    }
-    matches!(ev.key, Key::Char('c') | Key::Char('C'))
-}
-
-/// Nearest `open`..`close` pair surrounding column `col` on one line.
-fn pair_bounds(chars: &[char], col: u16, open: char, close: char) -> Option<(u16, u16)> {
-    let c = col as usize;
-    let s = (0..=c.min(chars.len().saturating_sub(1)))
-        .rev()
-        .find(|&i| chars[i] == open)?;
-    let e = ((c.min(chars.len().saturating_sub(1)))..chars.len()).find(|&i| chars[i] == close)?;
-    if s > e {
-        return None;
-    }
-    Some((s as u16, e as u16))
-}
-
 /// One command-palette entry after fuzzy filtering.
 pub struct PaletteItem {
     pub cmd: Command,
@@ -1601,6 +1567,10 @@ impl CommandArgs {
     }
 }
 
+// §4 Central state. `App::new` boots; §5 dispatch (`handle_key`, pollers,
+// mouse) is the first thing inside `impl App` below; secondary overlay
+// handlers follow in file order; §7 helpers live at the bottom.
+
 /// Full app state.
 pub struct App {
     pub config: Config,
@@ -1710,6 +1680,9 @@ pub struct App {
 }
 
 impl App {
+    // §5 Main dispatch first: `new`, `handle_key`, `poll_*`, mouse. Scroll
+    // down for overlay/command handlers (§6).
+
     /// Boot from the saved layout when present, else one "main" workspace.
     /// `layout_override` (from `--layout`) wins over the config-adjacent path.
     /// `rt` hosts one blocking reader thread per pane; `wake` nudges the UI
@@ -2144,15 +2117,17 @@ impl App {
                 }
                 crate::server::ServerCommand::GetStatus => {
                     let text = self.get_terminal_text();
-                    if let Some(tx) = &self.http_status_tx {
-                        let _ = tx.send(text);
-                    }
+                    if let Some(tx) = &self.http_status_tx
+                        && let Err(e) = tx.send(text) {
+                            log::debug!("http: status reply dropped: {e}");
+                        }
                 }
                 crate::server::ServerCommand::GetScreenshot => {
                     let png = self.get_terminal_screenshot();
-                    if let Some(tx) = &self.http_screenshot_tx {
-                        let _ = tx.send(png);
-                    }
+                    if let Some(tx) = &self.http_screenshot_tx
+                        && let Err(e) = tx.send(png) {
+                            log::debug!("http: screenshot reply dropped: {e}");
+                        }
                 }
                 crate::server::ServerCommand::Quit => {
                     self.should_quit = true;
@@ -2204,7 +2179,12 @@ impl App {
             "F10" => Key::F(10),
             "F11" => Key::F(11),
             "F12" => Key::F(12),
-            k if k.len() == 1 => Key::Char(k.chars().next().unwrap()),
+            k if k.len() == 1 => match k.chars().next() {
+                // `len() == 1` is one ASCII byte, so `next()` cannot miss;
+                // the `None` arm is defense-in-depth, never abort here.
+                Some(c) => Key::Char(c),
+                None => return,
+            },
             _ => return,
         };
         let press = KeyPress {
@@ -2326,7 +2306,9 @@ impl App {
             }
         }
         let mut buf = Vec::new();
-        let _ = img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png);
+        if let Err(e) = img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png) {
+            log::warn!("screenshot: PNG encode failed: {e}");
+        }
         buf
     }
 
@@ -2404,7 +2386,10 @@ impl App {
         for q in queries {
             let pane_id = q.pane_id;
             let reply = self.mcp_handle_query(pane_id, q.kind);
-            let _ = q.reply.send(reply);
+            // Client hung up mid-call: routine, logged, never fatal.
+            if q.reply.send(reply).is_err() {
+                log::debug!("mcp: reply dropped (client gone)");
+            }
         }
         changed |= self.mcp_reconcile();
         changed
@@ -2686,7 +2671,12 @@ impl App {
             "F11" => Key::F(11),
             "F12" => Key::F(12),
             other if other.chars().count() == 1 => {
-                Key::Char(other.chars().next().expect("one char"))
+                // Count guard makes `next()` infallible; `None` degrades to
+                // "ignore this key", never abort on external (MCP) input.
+                let Some(c) = other.chars().next() else {
+                    return;
+                };
+                Key::Char(c)
             }
             _ => return,
         };
@@ -2819,7 +2809,10 @@ impl App {
         let mut changed = !queries.is_empty();
         for q in queries {
             let reply = self.share_handle_query(q.pane_id, q.kind);
-            let _ = q.reply.send(reply);
+            // Viewer hung up mid-call: routine, logged, never fatal.
+            if q.reply.send(reply).is_err() {
+                log::debug!("share: reply dropped (viewer gone)");
+            }
         }
         changed |= self.share_reconcile();
         changed
@@ -2908,9 +2901,10 @@ impl App {
             match cmd {
                 crate::ipc::IpcCommand::SplitPane { args, dir } => {
                     let resp = self.handle_split_pane_ipc(args, dir);
-                    if let Some(tx) = &self.ipc_resp_tx {
-                        let _ = tx.send(resp);
-                    }
+                    if let Some(tx) = &self.ipc_resp_tx
+                        && let Err(e) = tx.send(resp) {
+                            log::debug!("ipc: response dropped (cli gone): {e}");
+                        }
                 }
                 crate::ipc::IpcCommand::ListPanes => {
                     let panes: Vec<crate::ipc::PaneInfo> = self
@@ -2930,14 +2924,15 @@ impl App {
                             })
                         })
                         .collect();
-                    if let Some(tx) = &self.ipc_resp_tx {
-                        let _ = tx.send(crate::ipc::Response {
+                    if let Some(tx) = &self.ipc_resp_tx
+                        && let Err(e) = tx.send(crate::ipc::Response {
                             ok: true,
                             pane_id: None,
                             panes: Some(panes),
                             error: None,
-                        });
-                    }
+                        }) {
+                            log::debug!("ipc: list response dropped (cli gone): {e}");
+                        }
                 }
             }
         }
@@ -3409,7 +3404,9 @@ impl App {
                 topic: worker_topic.clone(),
                 entries: crate::cheatsheet::parse_sheet(&text),
             });
-            let _ = tx.send(result);
+            if tx.send(result).is_err() {
+                log::debug!("cheat.sh: import result dropped (superseded)");
+            }
         });
         self.cheat_rx = Some(rx);
         log::info!("cheat.sh import: {topic}");
@@ -3608,7 +3605,9 @@ impl App {
         // neither spin forever nor kill instantly).
         let timeout = std::time::Duration::from_secs(self.config.ai.timeout_s.clamp(5, 3600));
         std::thread::spawn(move || {
-            let _ = tx.send(crate::ai::run_full(&command, &lead, &q, &saved, timeout));
+            if tx.send(crate::ai::run_full(&command, &lead, &q, &saved, timeout)).is_err() {
+                log::debug!("ai: answer dropped (superseded by newer question)");
+            }
         });
         self.ai_rx = Some(rx);
         log::info!("AI question: {question}");
@@ -3670,12 +3669,16 @@ impl App {
             return;
         }
         let target = self.ws().focused;
-        let survivor = self
+        // Guarded by the `len() <= 1` return above, so a survivor exists;
+        // degrade to no-op rather than abort if the invariant ever slips.
+        let Some(survivor) = self
             .ws()
             .leaf_ids()
             .into_iter()
             .find(|&id| id != target)
-            .expect("another leaf exists");
+        else {
+            return;
+        };
         self.ws_mut().set_focused(survivor);
         match self.close_delay_ms() {
             0 => {
@@ -3836,13 +3839,19 @@ impl App {
                         crate::font::render_preview(&path, &name, PREVIEW_BODY, title_px, fg, bg);
                     // A newer request that arrived mid-render wins; this stale
                     // result is dropped instead of flashing on screen.
-                    if req_rx.is_empty() {
-                        let _ = out_tx.send(PreviewOutcome {
-                            generation,
-                            path: path.to_string_lossy().into_owned(),
-                            size: title_px as u32,
-                            result,
-                        });
+                    // A newer request that arrived mid-render wins; this stale
+                    // result is dropped instead of flashing on screen.
+                    if req_rx.is_empty()
+                        && out_tx
+                            .send(PreviewOutcome {
+                                generation,
+                                path: path.to_string_lossy().into_owned(),
+                                size: title_px as u32,
+                                result,
+                            })
+                            .is_err()
+                    {
+                        log::debug!("font preview: stale outcome dropped");
                     }
                 }
             })
@@ -3890,14 +3899,16 @@ impl App {
         self.font_preview_sent = Some(key.clone());
         self.font_preview_loading = true;
         let theme = self.theme_colors();
-        let _ = tx.send(PreviewRequest {
+        if let Err(e) = tx.send(PreviewRequest {
             generation: self.font_preview_gen,
             path: hit.item.path.clone(),
             name: hit.item.name.clone(),
             title_px: p.size as f32,
             fg: theme.fg,
             bg: theme.bg,
-        });
+        }) {
+            log::warn!("font preview: request send failed: {e}");
+        }
     }
 
     /// Drain finished preview renders; only the latest generation applies.
@@ -5588,6 +5599,50 @@ impl App {
     }
 }
 
+// §7 Helpers (pure, no `App` borrow): key predicates, text objects,
+// editor invocation, textarea translation.
+
+/// Build the shell command that opens `path` in `editor`, quoting for the
+/// platform shell so paths with spaces work.
+fn edit_invocation(editor: &str, path: &std::path::Path) -> String {
+    let shown = path.display();
+    if cfg!(windows) {
+        format!("{editor} \"{shown}\"")
+    } else {
+        format!("{editor} '{shown}'")
+    }
+}
+
+/// Word character for text objects (alphanumeric or underscore).
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// True for a Ctrl+C keypress (any letter case, Shift tolerated): the shell's
+/// interrupt key. Alt/Super combos are different bindings and must not match.
+fn is_interrupt(ev: &KeyPress) -> bool {
+    if !ev.mods.contains(Mods::CONTROL) {
+        return false;
+    }
+    if ev.mods.contains(Mods::ALT) || ev.mods.contains(Mods::SUPER) {
+        return false;
+    }
+    matches!(ev.key, Key::Char('c') | Key::Char('C'))
+}
+
+/// Nearest `open`..`close` pair surrounding column `col` on one line.
+fn pair_bounds(chars: &[char], col: u16, open: char, close: char) -> Option<(u16, u16)> {
+    let c = col as usize;
+    let s = (0..=c.min(chars.len().saturating_sub(1)))
+        .rev()
+        .find(|&i| chars[i] == open)?;
+    let e = ((c.min(chars.len().saturating_sub(1)))..chars.len()).find(|&i| chars[i] == close)?;
+    if s > e {
+        return None;
+    }
+    Some((s as u16, e as u16))
+}
+
 /// Translate our backend-agnostic [`KeyPress`] into a `ratatui-textarea`
 /// [`Input`], so prompts keep their Emacs-style editing without crossterm.
 fn textarea_input(ev: &KeyPress) -> Input {
@@ -5618,5 +5673,5 @@ fn textarea_input(ev: &KeyPress) -> Input {
 }
 
 #[cfg(test)]
-#[path = "test/app_tests.rs"]
+#[path = "../test/app_tests.rs"]
 mod tests;

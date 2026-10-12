@@ -14,6 +14,9 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+// File order (§7-module-map §3): §1 `MAX_ENTRIES` → §4 `import` entry →
+// §5 fetch → §7 sheet-parse helpers.
+
 /// At most this many rows per import (a sheet is a few dozen lines; this
 /// caps pathological topics from flooding the database).
 pub const MAX_ENTRIES: usize = 200;
@@ -250,5 +253,5 @@ fn encode_topic(topic: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "test/cheatsheet_tests.rs"]
+#[path = "../test/cheatsheet_tests.rs"]
 mod tests;

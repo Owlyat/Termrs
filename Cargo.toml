@@ -69,6 +69,15 @@ termrs-share-proto = { path = "crates/termrs-share-proto" }
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }
 
+# Deterministic arithmetic policy (safety-critical integer rules): overflow
+# panics identically in every profile instead of wrapping silently in
+# release. Geometry paths additionally use saturating ops at the boundary.
+[profile.dev]
+overflow-checks = true
+
+[profile.release]
+overflow-checks = true
+
 # Size-optimized profile for the browser share client (wasm), built with
 # `cargo build -p termrs-share-web --profile wasm-release`.
 [profile.wasm-release]

@@ -6,6 +6,9 @@
 //! fonts (Nerd Font icons, symbols) that are tried for characters the primary
 //! font lacks.
 
+// File order (§7-module-map §3): §2 `FontSet` → §4 `load_set` entry → §7
+// OS candidate dirs + metric helpers.
+
 /// Primary font plus ordered fallbacks, all leaked to `'static`.
 pub struct FontSet {
     pub primary: &'static [u8],
@@ -597,5 +600,5 @@ fn fallback_candidates() -> Vec<std::path::PathBuf> {
 }
 
 #[cfg(test)]
-#[path = "test/font_tests.rs"]
+#[path = "../test/font_tests.rs"]
 mod tests;

@@ -11,6 +11,17 @@ use crossbeam_channel::{Receiver, Sender};
 use serde::Deserialize;
 use tiny_http::{Header, Method, Request, Response, Server};
 
+// File order (§7-module-map §3): §2 request/response types → §4
+// `start_server` entry → §5 route handlers → §7 response helpers.
+
+/// Reply to one HTTP request. A failed write means the client is gone:
+/// routine on a LAN server, logged at debug, never fatal to the thread.
+fn respond<R: std::io::Read>(request: Request, response: Response<R>) {
+    if let Err(e) = request.respond(response) {
+        log::debug!("http: respond failed (client gone?): {e}");
+    }
+}
+
 /// Key press request body.
 #[derive(Debug, Clone, Deserialize)]
 pub struct KeyRequest {
@@ -82,86 +93,93 @@ fn handle_request(
         (Method::Post, "/key") => {
             let mut body = String::new();
             if request.as_reader().read_to_string(&mut body).is_err() {
-                let _ = request.respond(Response::from_string("bad request").with_status_code(400));
+                respond(request, Response::from_string("bad request").with_status_code(400));
                 return;
             }
             let key_req: KeyRequest = match serde_json::from_str(&body) {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = request.respond(Response::from_string(format!("bad json: {e}")).with_status_code(400));
+                    respond(request, Response::from_string(format!("bad json: {e}")).with_status_code(400));
                     return;
                 }
             };
             if cmd_tx.send(ServerCommand::KeyPress { key: key_req.key, modifier: key_req.modifier }).is_err() {
-                let _ = request.respond(Response::from_string("server error").with_status_code(500));
+                respond(request, Response::from_string("server error").with_status_code(500));
                 return;
             }
-            let _ = request.respond(Response::from_string("ok"));
+            respond(request, Response::from_string("ok"));
         }
         (Method::Get, "/status") => {
             if cmd_tx.send(ServerCommand::GetStatus).is_err() {
-                let _ = request.respond(Response::from_string("server error").with_status_code(500));
+                respond(request, Response::from_string("server error").with_status_code(500));
                 return;
             }
             match status_rx.recv() {
                 Ok(text) => {
-                    let _ = request.respond(Response::from_string(text));
+                    respond(request, Response::from_string(text));
                 }
                 Err(_) => {
-                    let _ = request.respond(Response::from_string("timeout").with_status_code(500));
+                    respond(request, Response::from_string("timeout").with_status_code(500));
                 }
             }
         }
         (Method::Post, "/interrupt") => {
             if cmd_tx.send(ServerCommand::KeyPress { key: "c".to_string(), modifier: Some("Ctrl".to_string()) }).is_err() {
-                let _ = request.respond(Response::from_string("server error").with_status_code(500));
+                respond(request, Response::from_string("server error").with_status_code(500));
                 return;
             }
-            let _ = request.respond(Response::from_string("ok"));
+            respond(request, Response::from_string("ok"));
         }
         (Method::Post, "/command") => {
             let mut body = String::new();
             if request.as_reader().read_to_string(&mut body).is_err() {
-                let _ = request.respond(Response::from_string("bad request").with_status_code(400));
+                respond(request, Response::from_string("bad request").with_status_code(400));
                 return;
             }
             let cmd_req: CommandRequest = match serde_json::from_str(&body) {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = request.respond(Response::from_string(format!("bad json: {e}")).with_status_code(400));
+                    respond(request, Response::from_string(format!("bad json: {e}")).with_status_code(400));
                     return;
                 }
             };
             if cmd_tx.send(ServerCommand::RunCommand(cmd_req.command)).is_err() {
-                let _ = request.respond(Response::from_string("server error").with_status_code(500));
+                respond(request, Response::from_string("server error").with_status_code(500));
                 return;
             }
-            let _ = request.respond(Response::from_string("ok"));
+            respond(request, Response::from_string("ok"));
         }
         (Method::Post, "/quit") => {
             if cmd_tx.send(ServerCommand::Quit).is_err() {
-                let _ = request.respond(Response::from_string("server error").with_status_code(500));
+                respond(request, Response::from_string("server error").with_status_code(500));
                 return;
             }
-            let _ = request.respond(Response::from_string("ok"));
+            respond(request, Response::from_string("ok"));
         }
         (Method::Get, "/screenshot") => {
             if cmd_tx.send(ServerCommand::GetScreenshot).is_err() {
-                let _ = request.respond(Response::from_string("server error").with_status_code(500));
+                respond(request, Response::from_string("server error").with_status_code(500));
                 return;
             }
             match screenshot_rx.recv() {
-                Ok(png) => {
-                    let header = Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap();
-                    let _ = request.respond(Response::from_data(png).with_header(header));
-                }
+                Ok(png) => match Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]) {
+                    Ok(header) => {
+                        respond(request, Response::from_data(png).with_header(header));
+                    }
+                    Err(_) => {
+                        // Static bytes: unreachable in practice, but a 500
+                        // beats an abort if tiny_http ever rejects them.
+                        log::error!("http: cannot build PNG content header");
+                        respond(request, Response::from_string("server error").with_status_code(500));
+                    }
+                },
                 Err(_) => {
-                    let _ = request.respond(Response::from_string("timeout").with_status_code(500));
+                    respond(request, Response::from_string("timeout").with_status_code(500));
                 }
             }
         }
         _ => {
-            let _ = request.respond(Response::from_string("not found").with_status_code(404));
+            respond(request, Response::from_string("not found").with_status_code(404));
         }
     }
 }

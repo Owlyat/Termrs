@@ -13,9 +13,14 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::keys::{KeyKind, KeyPress, to_bytes};
 
+// §1 Tunables (all spawn/size/query behavior knobs live here, top of file).
+
 /// Default size before first layout assigns real rows/cols.
 const FALLBACK_ROWS: u16 = 24;
 const FALLBACK_COLS: u16 = 80;
+
+// §2 Types: `Chunk` (reader-thread → UI-thread mail) and `Pane`
+// (owned child + `vt100` parser + channels).
 
 /// One chunk of PTY output: raw bytes for the vt100 parser, plus the text
 /// already stripped of escape sequences (with prompt-marker offsets) for the
@@ -135,6 +140,7 @@ const WIN32_INPUT_OFF: &[u8] = b"\x1b[?9001l";
 const QUERY_TAIL_KEEP: usize = 12;
 
 /// Toggle termrs's own Ctrl+C immunity (see `install_console_guard`).
+// §3 Spawn constructors (OS-specific) — start here to change how shells boot.
 #[cfg(windows)]
 fn set_ctrlc_ignored(ignored: bool) {
     use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
@@ -182,6 +188,10 @@ fn spawn_without_ctrlc_inherit(
 }
 
 impl Pane {
+    // §4 Main loop: `spawn*` constructors → `poll` (drains reader, answers
+    // queries, feeds parser) → `write`/`write_key`/`paste`/`resize`/
+    // `interrupt` → `grid_lines`/`grid_lines_ansi` readers.
+
     /// Spawn `shell` (empty = auto) in a new PTY, pumping output on its own
     /// tokio blocking thread (`rt`). Every delivered chunk also pings `wake`
     /// so the UI thread redraws without waiting for its poll heartbeat.
@@ -294,7 +304,10 @@ impl Pane {
                         }
                         // Nudge the UI thread: output is waiting. The extra
                         // redraw requests coalesce, so floods stay cheap.
-                        let _ = wake.send(());
+                        // The UI is gone only during teardown; logged, never fatal.
+                        if let Err(e) = wake.send(()) {
+                            log::debug!("pty{}: wake nudge failed: {e}", id);
+                        }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => break,
                     Err(_) => {
@@ -348,9 +361,11 @@ impl Pane {
             self.answer_queries(&chunk.raw);
             self.record_output(&chunk.text, chunk.marks, &chunk.osc7);
             // Mirror raw output to share viewers (if any) before parsing.
-            if let Some(tx) = &self.share_out {
-                let _ = tx.send(chunk.raw.clone());
-            }
+            // No viewers attached is routine (broadcast has no receivers).
+            if let Some(tx) = &self.share_out
+                && let Err(e) = tx.send(chunk.raw.clone()) {
+                    log::debug!("pty{}: share mirror failed: {e}", self.id);
+                }
             self.parser.process(&chunk.raw);
         }
         if !self.dead
@@ -530,8 +545,12 @@ impl Pane {
             }
         }
         if !reply.is_empty() {
-            let _ = self.writer.write_all(&reply);
-            let _ = self.writer.flush();
+            if let Err(e) = self.writer.write_all(&reply) {
+                log::warn!("pty{}: query reply write failed: {e}", self.id);
+            }
+            if let Err(e) = self.writer.flush() {
+                log::warn!("pty{}: query reply flush failed: {e}", self.id);
+            }
         }
     }
 
@@ -563,12 +582,14 @@ impl Pane {
                 )
             })
             .unwrap_or((0, 0));
-        let _ = self.master.resize(PtySize {
+        if let Err(e) = self.master.resize(PtySize {
             rows,
             cols,
             pixel_width,
             pixel_height,
-        });
+        }) {
+            log::warn!("pty{}: resize failed: {e}", self.id);
+        }
         self.parser.screen_mut().set_size(rows, cols);
     }
 
@@ -589,8 +610,12 @@ impl Pane {
         if self.parser.screen().scrollback() > 0 {
             self.parser.screen_mut().set_scrollback(0);
         }
-        let _ = self.writer.write_all(&[0x03]);
-        let _ = self.writer.flush();
+        if let Err(e) = self.writer.write_all(&[0x03]) {
+            log::warn!("pty{}: interrupt write failed: {e}", self.id);
+        }
+        if let Err(e) = self.writer.flush() {
+            log::warn!("pty{}: interrupt flush failed: {e}", self.id);
+        }
         #[cfg(windows)]
         self.send_ctrl_c_event();
     }
@@ -676,8 +701,12 @@ impl Pane {
             self.parser.screen_mut().set_scrollback(0);
         }
         self.track_input(bytes);
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+        if let Err(e) = self.writer.write_all(bytes) {
+            log::warn!("pty{}: write failed: {e}", self.id);
+        }
+        if let Err(e) = self.writer.flush() {
+            log::warn!("pty{}: flush failed: {e}", self.id);
+        }
     }
 
     /// Forward one key event to the child.
@@ -707,8 +736,12 @@ impl Pane {
                     if self.parser.screen().scrollback() > 0 {
                         self.parser.screen_mut().set_scrollback(0);
                     }
-                    let _ = self.writer.write_all(&bytes);
-                    let _ = self.writer.flush();
+                    if let Err(e) = self.writer.write_all(&bytes) {
+                        log::warn!("pty{}: win32 key write failed: {e}", self.id);
+                    }
+                    if let Err(e) = self.writer.flush() {
+                        log::warn!("pty{}: win32 key flush failed: {e}", self.id);
+                    }
                     // Keep the typed-line tracker in sync (win32 records are
                     // not literal bytes, so the normal path cannot track them).
                     if press.kind != KeyKind::Release
@@ -1062,6 +1095,7 @@ impl Pane {
 
 /// Append one SGR color selector for `color` (`38;…` fg, `48;…` bg).
 /// `Default` emits nothing: callers reset instead.
+// §5 ANSI helper for the MCP `format: "ansi"` path (used by `grid_lines_ansi`).
 fn push_color_param(params: &mut Vec<String>, color: vt100::Color, bg: bool) {
     match color {
         vt100::Color::Default => {}
@@ -1088,6 +1122,7 @@ fn push_color_param(params: &mut Vec<String>, color: vt100::Color, bg: bool) {
 /// Serializes tests that spawn real shells: parallel ConPTY + `cmd.exe`
 /// spawn storms intermittently stall for a minute or more (conhost startup
 /// serialization / AV scanning), so PTY tests take this guard.
+// §6 Test support (serializes live-shell tests; pure helpers in §7).
 #[cfg(test)]
 pub(crate) static PTY_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -1102,6 +1137,7 @@ pub(crate) fn lock_pty_tests() -> std::sync::MutexGuard<'static, ()> {
 
 /// Count terminal queries in `data`: `(cursor DSR, status DSR, cell-size)`.
 /// Pure helper so the scanning is unit-testable without a live PTY.
+// §7 Pure helpers (no pane state): query scanning, paste, prompt heuristics.
 fn count_queries(data: &[u8]) -> (usize, usize, usize) {
     let count = |needle: &[u8]| {
         if data.len() < needle.len() {
@@ -1118,24 +1154,6 @@ fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     hay.windows(needle.len()).rposition(|w| w == needle)
-}
-
-#[cfg(test)]
-mod win32_mode_tests {
-    use super::*;
-
-    /// The mode toggle is found wherever it appears (last wins), including a
-    /// sequence glued to other output.
-    #[test]
-    fn detects_win32_input_mode_toggle() {
-        assert_eq!(rfind(b"ab\x1b[?9001hcd", WIN32_INPUT_ON), Some(2));
-        assert_eq!(rfind(b"ab\x1b[?9001hcd", WIN32_INPUT_OFF), None);
-        assert_eq!(rfind(b"\x1b[?9001l", WIN32_INPUT_OFF), Some(0));
-        // Both present: the later one decides.
-        let mut both = b"\x1b[?9001h".to_vec();
-        both.extend_from_slice(b"\x1b[?9001l");
-        assert!(rfind(&both, WIN32_INPUT_OFF) > rfind(&both, WIN32_INPUT_ON));
-    }
 }
 
 /// Mark pasted text with bracketed-paste markers when requested.
@@ -1320,6 +1338,26 @@ fn promptish(line: &str) -> bool {
     matches!(t.chars().last(), Some('>') | Some('$') | Some('%') | Some('#'))
 }
 
+// §8 Inline unit tests (live-PTy tests live in `test/pty_tests.rs`).
+
+#[cfg(test)]
+mod win32_mode_tests {
+    use super::*;
+
+    /// The mode toggle is found wherever it appears (last wins), including a
+    /// sequence glued to other output.
+    #[test]
+    fn detects_win32_input_mode_toggle() {
+        assert_eq!(rfind(b"ab\x1b[?9001hcd", WIN32_INPUT_ON), Some(2));
+        assert_eq!(rfind(b"ab\x1b[?9001hcd", WIN32_INPUT_OFF), None);
+        assert_eq!(rfind(b"\x1b[?9001l", WIN32_INPUT_OFF), Some(0));
+        // Both present: the later one decides.
+        let mut both = b"\x1b[?9001h".to_vec();
+        both.extend_from_slice(b"\x1b[?9001l");
+        assert!(rfind(&both, WIN32_INPUT_OFF) > rfind(&both, WIN32_INPUT_ON));
+    }
+}
+
 #[cfg(test)]
 mod query_tests {
     use super::{CELL_SIZE, DSR, DSR_STATUS, QUERY_TAIL_KEEP, count_queries};
@@ -1452,5 +1490,5 @@ fn default_shell() -> String {
 }
 
 #[cfg(test)]
-#[path = "test/pty_tests.rs"]
+#[path = "../test/pty_tests.rs"]
 mod tests;

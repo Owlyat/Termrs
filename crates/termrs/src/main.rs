@@ -14,29 +14,60 @@
 // `cargo run` output, logs and CLI flags stay visible while developing.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod ai;
-mod ansi;
+// Module layout (physical folders, flat logical names via `#[path]` so
+// `crate::app`, `crate::pty`, … keep working—see `Architecture/07-module-map.md`):
+//   core/     — app state, input, persistence
+//   term/     — terminal emulation
+//   render/   — window + GPU draw
+//   services/ — background servers/integrations
+// Within each file, top→bottom: tunables → public types → entry points /
+// main loops / event handling → secondary handlers → private helpers.
+#[path = "core/app.rs"]
 mod app;
-mod cheatsheet;
-mod clipboard;
-mod commands_db;
-mod config;
-mod font;
-mod image_gpu;
-mod image_view;
-mod ipc;
-mod keys;
-mod layout;
-mod logging;
-mod mcp;
-mod mouse;
-mod pty;
-mod scrollback;
-mod server;
-mod share;
-mod ui;
-mod window;
+#[path = "core/workspace.rs"]
 mod workspace;
+#[path = "core/layout.rs"]
+mod layout;
+#[path = "core/config.rs"]
+mod config;
+#[path = "core/keys.rs"]
+mod keys;
+#[path = "core/mouse.rs"]
+mod mouse;
+#[path = "core/commands_db.rs"]
+mod commands_db;
+#[path = "core/cheatsheet.rs"]
+mod cheatsheet;
+#[path = "core/clipboard.rs"]
+mod clipboard;
+#[path = "term/pty.rs"]
+mod pty;
+#[path = "term/ansi.rs"]
+mod ansi;
+#[path = "term/scrollback.rs"]
+mod scrollback;
+#[path = "render/window.rs"]
+mod window;
+#[path = "render/ui.rs"]
+mod ui;
+#[path = "render/image_gpu.rs"]
+mod image_gpu;
+#[path = "render/image_view.rs"]
+mod image_view;
+#[path = "render/font.rs"]
+mod font;
+#[path = "services/mcp.rs"]
+mod mcp;
+#[path = "services/share.rs"]
+mod share;
+#[path = "services/server.rs"]
+mod server;
+#[path = "services/ipc.rs"]
+mod ipc;
+#[path = "services/ai.rs"]
+mod ai;
+#[path = "services/logging.rs"]
+mod logging;
 
 use clap::Parser;
 
@@ -155,10 +186,15 @@ fn main() -> std::process::ExitCode {
             args.push("--master".into());
             const DETACHED_PROCESS: u32 = 0x0000_0008;
             const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-            let _ = Command::new(exe)
+            // No logger yet at this point: failures go to stderr directly.
+            if let Err(e) = Command::new(exe)
                 .args(&args)
                 .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-                .spawn();
+                .spawn()
+            {
+                eprintln!("termrs: cannot spawn detached server: {e}");
+                return std::process::ExitCode::FAILURE;
+            }
             return std::process::ExitCode::SUCCESS;
         }
     }
@@ -201,7 +237,14 @@ fn run_cli(cmd: CliCommand) -> std::process::ExitCode {
         Ok(resp) => {
             if resp.ok {
                 if let Some(panes) = resp.panes {
-                    println!("{}", serde_json::to_string_pretty(&panes).unwrap());
+                    match serde_json::to_string_pretty(&panes) {
+                        Ok(pretty) => println!("{pretty}"),
+                        Err(e) => {
+                            log::error!("cli: cannot serialize pane list: {e}");
+                            eprintln!("termrs: cannot serialize pane list: {e}");
+                            return std::process::ExitCode::FAILURE;
+                        }
+                    }
                 } else if let Some(pane_id) = resp.pane_id {
                     println!("{{\"pane_id\": {pane_id}}}");
                 }

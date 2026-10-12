@@ -9,6 +9,10 @@ use std::path::PathBuf;
 use crossbeam_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
 
+// File order (§7-module-map §3): §2 `Request`/`Response` types → §4
+// `start_server`/`send_request` entries → §5 connection handlers → §7
+// socket-path helpers.
+
 /// Request from an external CLI client.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Request {
@@ -41,6 +45,19 @@ pub struct PaneInfo {
     pub title: String,
     pub dead: bool,
     pub cwd: String,
+}
+
+/// Serialize a response line. Our shapes are string-only (serialization is
+/// infallible in practice), but a failure must log and skip the write —
+/// never abort the server thread.
+fn json_body(resp: &Response) -> Option<String> {
+    match serde_json::to_string(resp) {
+        Ok(body) => Some(body),
+        Err(e) => {
+            log::error!("ipc: cannot serialize response: {e}");
+            None
+        }
+    }
 }
 
 /// Commands the IPC server sends to the app.
@@ -128,16 +145,32 @@ pub fn start_server() -> IpcServer {
                 let handle = SendHandle(handle as usize);
                 std::thread::spawn(move || {
                     let SendHandle(handle) = handle;
-                    let mut reader = BufReader::new(unsafe { std::fs::File::from_raw_handle(handle as *mut std::ffi::c_void) });
+                    // SAFETY: `handle` is the freshly accepted pipe instance,
+                    // owned by this thread. `sock` is the ONLY `File` ever
+                    // built from it, so the handle closes exactly once (when
+                    // `sock` drops). A second `File` from the same handle
+                    // would double-`CloseHandle` on thread exit.
+                    let mut sock =
+                        unsafe { std::fs::File::from_raw_handle(handle as *mut std::ffi::c_void) };
                     let mut line = String::new();
-                    if reader.read_line(&mut line).is_err() {
+                    // Borrowed reader: read-ahead stays inside `sock`'s
+                    // ownership (request line is fully sent before any reply).
+                    let read_ok = {
+                        let mut reader = BufReader::new(&sock);
+                        reader.read_line(&mut line).is_ok()
+                    };
+                    if !read_ok {
                         return;
                     }
                     let req: Request = match serde_json::from_str(&line) {
                         Ok(r) => r,
                         Err(e) => {
-                            let mut s = unsafe { std::fs::File::from_raw_handle(handle as _) };
-                            let _ = writeln!(s, "{}", serde_json::to_string(&Response { ok: false, pane_id: None, panes: None, error: Some(format!("bad request: {e}")) }).unwrap());
+                            let err = Response { ok: false, pane_id: None, panes: None, error: Some(format!("bad request: {e}")) };
+                            if let Some(body) = json_body(&err)
+                                && let Err(e) = writeln!(sock, "{body}")
+                            {
+                                log::debug!("ipc: reply write failed (cli gone?): {e}");
+                            }
                             return;
                         }
                     };
@@ -147,8 +180,12 @@ pub fn start_server() -> IpcServer {
                         _ => None,
                     };
                     let Some(cmd) = cmd else {
-                        let mut s = unsafe { std::fs::File::from_raw_handle(handle as _) };
-                        let _ = writeln!(s, "{}", serde_json::to_string(&Response { ok: false, pane_id: None, panes: None, error: Some(format!("unknown cmd: {}", req.cmd)) }).unwrap());
+                        let err = Response { ok: false, pane_id: None, panes: None, error: Some(format!("unknown cmd: {}", req.cmd)) };
+                        if let Some(body) = json_body(&err)
+                            && let Err(e) = writeln!(sock, "{body}")
+                        {
+                            log::debug!("ipc: reply write failed (cli gone?): {e}");
+                        }
                         return;
                     };
                     if cmd_tx.send(cmd).is_err() {
@@ -158,16 +195,21 @@ pub fn start_server() -> IpcServer {
                         Ok(r) => r,
                         Err(_) => return,
                     };
-                    let mut s = unsafe { std::fs::File::from_raw_handle(handle as _) };
-                    let _ = writeln!(s, "{}", serde_json::to_string(&resp).unwrap());
+                    if let Some(body) = json_body(&resp)
+                        && let Err(e) = writeln!(sock, "{body}")
+                    {
+                        log::debug!("ipc: reply write failed (cli gone?): {e}");
+                    }
                     unsafe { DisconnectNamedPipe(handle as *mut std::ffi::c_void) };
-                    unsafe { CloseHandle(handle as *mut std::ffi::c_void) };
                 });
             }
         }
         #[cfg(not(windows))]
         {
-            let _ = std::fs::remove_file(&path);
+            // Stale socket from a dead process; absence is the normal case.
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::debug!("ipc: no stale socket to clear: {e}");
+            }
             let listener = match std::os::unix::net::UnixListener::bind(&path) {
                 Ok(l) => l,
                 Err(e) => {
@@ -191,7 +233,12 @@ pub fn start_server() -> IpcServer {
                                 Ok(r) => r,
                                 Err(e) => {
                                     let mut s = s;
-                                    let _ = writeln!(s, "{}", serde_json::to_string(&Response { ok: false, pane_id: None, panes: None, error: Some(format!("bad request: {e}")) }).unwrap());
+                                    let err = Response { ok: false, pane_id: None, panes: None, error: Some(format!("bad request: {e}")) };
+                                    if let Some(body) = json_body(&err)
+                                        && let Err(e) = writeln!(s, "{body}")
+                                    {
+                                        log::debug!("ipc: reply write failed (cli gone?): {e}");
+                                    }
                                     return;
                                 }
                             };
@@ -202,7 +249,12 @@ pub fn start_server() -> IpcServer {
                             };
                             let Some(cmd) = cmd else {
                                 let mut s = s;
-                                let _ = writeln!(s, "{}", serde_json::to_string(&Response { ok: false, pane_id: None, panes: None, error: Some(format!("unknown cmd: {}", req.cmd)) }).unwrap());
+                                let err = Response { ok: false, pane_id: None, panes: None, error: Some(format!("unknown cmd: {}", req.cmd)) };
+                                if let Some(body) = json_body(&err)
+                                    && let Err(e) = writeln!(s, "{body}")
+                                {
+                                    log::debug!("ipc: reply write failed (cli gone?): {e}");
+                                }
                                 return;
                             };
                             if cmd_tx.send(cmd).is_err() {
@@ -213,7 +265,11 @@ pub fn start_server() -> IpcServer {
                                 Err(_) => return,
                             };
                             let mut s = s;
-                            let _ = writeln!(s, "{}", serde_json::to_string(&resp).unwrap());
+                            if let Some(body) = json_body(&resp)
+                                && let Err(e) = writeln!(s, "{body}")
+                            {
+                                log::debug!("ipc: reply write failed (cli gone?): {e}");
+                            }
                         });
                     }
                     Err(_) => break,

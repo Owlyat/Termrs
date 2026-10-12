@@ -13,6 +13,9 @@ use tui_scrollview::{ScrollView, ScrollViewState};
 
 use crate::pty::Pane;
 
+// File order (§7-module-map §3): §2 `ScrollbackView` → §4 `open`/`refresh`
+// entries → §5 scroll input → §7 snapshot helpers.
+
 /// Snapshot viewer over one pane's history.
 pub struct ScrollbackView {
     lines: Vec<String>,

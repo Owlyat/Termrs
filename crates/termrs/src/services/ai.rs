@@ -26,6 +26,10 @@ use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+// File order (§7-module-map §3): §1 tunables (`DEFAULT_AI_TIMEOUT`,
+// `PROBE_TIMEOUT`, `MAX_TURNS`) → §2 prompt/turn types → §4 `run_full`
+// entry → §5 turn loop + query runners → §7 extract/parse helpers.
+
 /// Default limit on how long the AI CLI may run per turn before it is
 /// killed. Overridable per run (and via `[ai] timeout_s`).
 #[cfg(test)]
@@ -263,7 +267,10 @@ fn run_raw_inner(
         .map_err(|e| format!("run {line:?}: {e}"))?;
     if !has_placeholder
         && let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(prompt.as_bytes());
+            // Child may have exited already; collect below reports the outcome.
+            if let Err(e) = stdin.write_all(prompt.as_bytes()) {
+                log::warn!("ai: prompt write to child stdin failed: {e}");
+            }
             // Drop closes stdin so CLIs that read to EOF proceed.
         }
     let (stdout, stderr, status, timed_out) = collect_with(child, timeout)?;
@@ -376,8 +383,13 @@ fn collect_with(
             }
             None => {
                 if start.elapsed() > limit {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    // Best-effort reaping: already-exited is the common race.
+                    if let Err(e) = child.kill() {
+                        log::debug!("ai: kill on timeout failed (already exited?): {e}");
+                    }
+                    if let Err(e) = child.wait() {
+                        log::debug!("ai: wait after kill failed: {e}");
+                    }
                     timed_out = true;
                     break;
                 }
@@ -398,7 +410,9 @@ fn collect_with(
 fn spawn_reader(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = pipe.read_to_end(&mut buf);
+        if let Err(e) = pipe.read_to_end(&mut buf) {
+            log::warn!("ai: pipe drain failed (output truncated): {e}");
+        }
         buf
     })
 }
@@ -1268,5 +1282,5 @@ fn clean(line: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "test/ai_tests.rs"]
+#[path = "../test/ai_tests.rs"]
 mod tests;

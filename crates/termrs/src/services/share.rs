@@ -22,6 +22,10 @@ use iroh::{Endpoint, EndpointId};
 use iroh_tickets::endpoint::EndpointTicket;
 use termrs_share_proto::{ALPN, Frame, LEN_PREFIX, Mode, body_len};
 
+// File order (§7-module-map §3): §2 `ShareQuery`/`ShareReply` types → §4
+// `start_sharing` entry → §5 accept loop + frame handlers → §7 link/code
+// helpers.
+
 /// Capacity of the pane-output broadcast ring. A viewer that falls behind by
 /// more than this gets a fresh snapshot instead of every missed byte.
 const OUT_CAPACITY: usize = 2048;
@@ -132,9 +136,11 @@ pub struct ShareSession {
 impl ShareSession {
     /// Ask the endpoint to shut down. Idempotent.
     pub fn stop(&mut self) {
-        if let Some(tx) = self.stop_tx.take() {
-            let _ = tx.send(());
-        }
+        if let Some(tx) = self.stop_tx.take()
+            && tx.send(()).is_err() {
+                // Server task already gone: the idempotent-stop race.
+                log::debug!("share: stop signal dropped (already stopped)");
+            }
     }
 }
 
@@ -188,7 +194,9 @@ pub fn start(
         let endpoint = match Endpoint::builder(presets::N0).bind().await {
             Ok(e) => e,
             Err(e) => {
-                let _ = ready_tx.send(Err(format!("iroh bind failed: {e}")));
+                if ready_tx.send(Err(format!("iroh bind failed: {e}"))).is_err() {
+                    log::warn!("share: bind-failure reply dropped (caller gone)");
+                }
                 return;
             }
         };
@@ -200,9 +208,16 @@ pub fn start(
         let router = Router::builder(endpoint)
             .accept(ALPN, handler)
             .spawn();
-        let _ = ready_tx.send(Ok(ticket));
-        let _ = stop_rx.await;
-        let _ = router.shutdown().await;
+        if ready_tx.send(Ok(ticket)).is_err() {
+            log::warn!("share: ticket reply dropped (caller gave up)");
+        }
+        if stop_rx.await.is_err() {
+            // Stop handle dropped without stopping (pane closed): routine.
+            log::debug!("share: stop channel closed without signal");
+        }
+        if let Err(e) = router.shutdown().await {
+            log::warn!("share pane {pane_id}: endpoint shutdown failed: {e:?}");
+        }
         log::info!("share pane {pane_id}: endpoint closed");
     });
 
@@ -246,12 +261,16 @@ impl ShareHandler {
         let hello = match read_frame(&mut recv).await? {
             Frame::Hello(h) => h,
             _ => {
-                let _ = write_frame(&mut send, &Frame::Error("expected hello".into())).await;
+                if write_frame(&mut send, &Frame::Error("expected hello".into())).await.is_err() {
+                    log::debug!("share: handshake-error write failed (peer gone)");
+                }
                 return Err("first frame was not hello".into());
             }
         };
         if !self.shared.code.is_empty() && hello.code != self.shared.code {
-            let _ = write_frame(&mut send, &Frame::Error("invalid code".into())).await;
+            if write_frame(&mut send, &Frame::Error("invalid code".into())).await.is_err() {
+                log::debug!("share: code-error write failed (peer gone)");
+            }
             conn.close(1u8.into(), b"invalid code");
             return Ok(());
         }
@@ -300,7 +319,9 @@ impl ShareHandler {
         while let Ok(frame) = read_frame(&mut recv).await {
             match frame {
                 Frame::Input(bytes) if control => {
-                    let _ = self.shared.input(bytes).await;
+                    if let Err(e) = self.shared.input(bytes).await {
+                        log::warn!("share: viewer input dropped: {e}");
+                    }
                 }
                 // Resize is accepted for forward-compatibility but does not
                 // resize the host pane (the local view stays authoritative).
@@ -349,5 +370,5 @@ async fn write_frame<W: tokio::io::AsyncWrite + Unpin>(
 }
 
 #[cfg(test)]
-#[path = "test/share_tests.rs"]
+#[path = "../test/share_tests.rs"]
 mod tests;

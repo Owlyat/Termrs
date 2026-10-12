@@ -261,3 +261,17 @@
         ws.rects.clear();
         assert_eq!(ws.pane_at(0, 0), None);
     }
+
+    /// Nesting depth counts `Split` levels iteratively (no recursion, so the
+    /// validator itself cannot overflow on a hostile layout file).
+    #[test]
+    fn layout_depth_counts_nesting() {
+        use crate::layout::TreeLayout;
+
+        let mut tree = TreeLayout::Pane;
+        assert_eq!(super::layout_depth(&tree), 0);
+        for expected in 1..=(super::MAX_LAYOUT_DEPTH + 8) {
+            tree = TreeLayout::split(SplitDir::Vertical, 0.5, tree, TreeLayout::Pane);
+            assert_eq!(super::layout_depth(&tree), expected);
+        }
+    }

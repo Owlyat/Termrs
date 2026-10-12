@@ -10,6 +10,9 @@ use winit::event::KeyEvent as WinitKeyEvent;
 use winit::keyboard::{Key as WinitKey, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
+// File order (§7-module-map §3): §2 `Mods`/`Key`/`KeyPress` types → §4
+// `from_winit` entry → §5 binding parse/match → §7 PTY byte encoding helpers.
+
 /// Modifier flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Mods(u8);
@@ -582,5 +585,5 @@ fn control_to_letter(c: char) -> char {
 }
 
 #[cfg(test)]
-#[path = "test/keys_tests.rs"]
+#[path = "../test/keys_tests.rs"]
 mod tests;

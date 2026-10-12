@@ -8,6 +8,9 @@
 
 use crate::keys::Mods;
 
+// File order (§7-module-map §3): §2 `MouseButton`/`MouseEncoding`/state types →
+// §4 encode entry (SGR/X10 reports) → §7 URL-scan helpers.
+
 /// Mouse buttons we forward (mapped from winit upstream).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
@@ -164,7 +167,11 @@ fn encode(
                     push_utf8_coord(&mut out, cx);
                     push_utf8_coord(&mut out, cy);
                 }
-                MouseEncoding::Sgr => unreachable!(),
+                // Provably dead (outer arm excluded `Sgr`), but a future
+                // encoding must degrade to "no bytes", never abort.
+                MouseEncoding::Sgr => {
+                    debug_assert!(false, "encode: SGR handled by outer arm");
+                }
             }
             out
         }
@@ -286,5 +293,5 @@ fn trim_url(raw: &str) -> &str {
 }
 
 #[cfg(test)]
-#[path = "test/mouse_tests.rs"]
+#[path = "../test/mouse_tests.rs"]
 mod tests;

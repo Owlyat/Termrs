@@ -95,6 +95,61 @@ pub struct TermrsWindow {
     server_addr: Option<String>,
 }
 
+// §4 Entry points — read these first. `run` is the normal boot, `run_selftest`
+// renders one frame for CI, `run_inner` owns the tokio runtime + winit loop.
+
+/// Run the native window until it closes. Returns the first fatal error, if any.
+pub fn run(
+    config: Config,
+    layout_path: Option<std::path::PathBuf>,
+    server_addr: Option<&str>,
+) -> Result<(), String> {
+    run_inner(config, layout_path, false, server_addr)
+}
+
+/// Boot the window, render one frame, then exit. For smoke tests / CI.
+pub fn run_selftest(config: Config) -> Result<(), String> {
+    run_inner(config, None, true, None)
+}
+
+/// Shared event-loop driver for normal and self-test runs.
+///
+/// A multi-thread tokio runtime lives for the whole run: pane readers and the
+/// input worker are `spawn_blocking` tasks on it, while winit owns the main
+/// thread. Dropping it at the end aborts the workers as the process exits.
+fn run_inner(
+    config: Config,
+    layout_path: Option<std::path::PathBuf>,
+    selftest: bool,
+    server_addr: Option<&str>,
+) -> Result<(), String> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("termrs-worker")
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+    let event_loop = EventLoop::<AppEvent>::with_user_event()
+        .build()
+        .map_err(|e| format!("event loop: {e}"))?;
+    let mut handler =
+        TermrsWindow::with_selftest(config, layout_path, selftest, rt.handle().clone());
+    handler.server_addr = server_addr.map(|s| s.to_string());
+    handler.proxy = Some(event_loop.create_proxy());
+    event_loop
+        .run_app(&mut handler)
+        .map_err(|e| format!("run: {e}"))?;
+    // Detach without waiting: pane readers block in PTY reads until their
+    // shells exit, and dropping the runtime would stall on them instead of
+    // letting the process quit. The OS reclaims the threads on exit.
+    rt.shutdown_background();
+    match handler.error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+// §5 Window lifecycle (init/resume/redraw helpers).
+
 /// Monospace flag for one font path, for logging (`true`/`false`/`unknown`).
 fn mono_flag(path: &str) -> String {
     match crate::font::is_monospaced(std::path::Path::new(path)) {
@@ -139,13 +194,18 @@ impl TermrsWindow {
 
     /// Build the GPU terminal for `window` at the given glyph height.
     fn build_backend(&self, window: &Arc<Window>, font_size: u32) -> Result<Term, String> {
-        let set = self.font_set.as_ref().expect("font loaded in init");
+        let set = self
+            .font_set
+            .as_ref()
+            .ok_or("font set missing: init did not load fonts")?;
         let font = Font::new(set.primary).ok_or("font could not be parsed")?;
         let fallbacks: Vec<Font> = set.fallbacks.iter().filter_map(|b| Font::new(b)).collect();
 
         let size = window.inner_size();
-        let width = NonZeroU32::new(size.width.max(1)).expect("non-zero width");
-        let height = NonZeroU32::new(size.height.max(1)).expect("non-zero height");
+        // `max(1)` makes zero impossible; `MIN` (1) is the graceful fallback
+        // so a backend rebuild degrades instead of aborting the process.
+        let width = NonZeroU32::new(size.width.max(1)).unwrap_or(NonZeroU32::MIN);
+        let height = NonZeroU32::new(size.height.max(1)).unwrap_or(NonZeroU32::MIN);
 
         let theme = self.config.theme.resolve();
         let clear = [
@@ -381,7 +441,7 @@ impl TermrsWindow {
         // nudge becomes an immediate poll + redraw instead of waiting for
         // the 16ms heartbeat.
         let (act_tx, act_rx) = unbounded::<()>();
-        let proxy = self.proxy.take().expect("proxy set before run");
+        let proxy = self.proxy.take().ok_or("event proxy missing")?;
         let proxy_out = proxy.clone();
         self.rt.spawn_blocking(move || {
             while act_rx.recv().is_ok() {
@@ -405,7 +465,9 @@ impl TermrsWindow {
         let server_mode = self.server_addr.is_some();
         if server_mode && let Ok(cwd) = std::env::current_dir() {
             log::info!("server mode: using working directory {}", cwd.display());
-            let _ = std::env::set_current_dir(&cwd);
+            if let Err(e) = std::env::set_current_dir(&cwd) {
+                log::warn!("server mode: cannot lock cwd {}: {e}", cwd.display());
+            }
         }
         let mut app = App::new(
             self.config.clone(),
@@ -814,6 +876,8 @@ impl TermrsWindow {
 }
 
 impl ApplicationHandler<AppEvent> for TermrsWindow {
+    // §6 Main loop: resumed → init, window_event → input, user_event →
+    // apply, about_to_wait → poll + gated redraw.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(e) = self.init(event_loop) {
             log::error!("init failed: {e}");
@@ -931,10 +995,13 @@ impl ApplicationHandler<AppEvent> for TermrsWindow {
                         event.state,
                         self.mods
                     );
-                    let _ = tx.send(RawInput {
+                    // A dead input worker means no keyboard: loud, not silent.
+                    if let Err(e) = tx.send(RawInput {
                         event: event.clone(),
                         mods: self.mods,
-                    });
+                    }) {
+                        log::warn!("input worker gone, key dropped: {e}");
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -1009,17 +1076,13 @@ impl ApplicationHandler<AppEvent> for TermrsWindow {
         // Hot reload replaces `app.config` in place; mirror it into the
         // window host's copy so `[window]` (backdrop, decorations, theme for
         // rebuilds) follows live edits instead of going stale.
-        let stale = self
-            .app
-            .as_ref()
-            .is_some_and(|app| app.config != self.config);
-        if stale {
+        if let Some(app) = self.app.as_ref()
+            && app.config != self.config
+        {
             redraw = true;
-            let fresh = self
-                .app
-                .as_ref()
-                .map(|app| app.config.clone())
-                .expect("app present");
+            // Owned clone under the borrow; everything below re-borrows, so
+            // no expect() on a provably-present app.
+            let fresh = app.config.clone();
             if fresh.window.decorations != self.config.window.decorations
                 && let Some(w) = &self.window
             {
@@ -1053,6 +1116,8 @@ impl ApplicationHandler<AppEvent> for TermrsWindow {
     }
 }
 
+// §7 Helpers (pure, no window state).
+
 /// Translate winit modifier state into our own flags.
 fn mods_from(m: ModifiersState) -> Mods {
     let mut out = Mods::empty();
@@ -1069,54 +1134,4 @@ fn mods_from(m: ModifiersState) -> Mods {
         out.insert(Mods::SUPER);
     }
     out
-}
-
-/// Run the native window until it closes. Returns the first fatal error, if any.
-pub fn run(
-    config: Config,
-    layout_path: Option<std::path::PathBuf>,
-    server_addr: Option<&str>,
-) -> Result<(), String> {
-    run_inner(config, layout_path, false, server_addr)
-}
-
-/// Boot the window, render one frame, then exit. For smoke tests / CI.
-pub fn run_selftest(config: Config) -> Result<(), String> {
-    run_inner(config, None, true, None)
-}
-
-/// Shared event-loop driver for normal and self-test runs.
-///
-/// A multi-thread tokio runtime lives for the whole run: pane readers and the
-/// input worker are `spawn_blocking` tasks on it, while winit owns the main
-/// thread. Dropping it at the end aborts the workers as the process exits.
-fn run_inner(
-    config: Config,
-    layout_path: Option<std::path::PathBuf>,
-    selftest: bool,
-    server_addr: Option<&str>,
-) -> Result<(), String> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("termrs-worker")
-        .build()
-        .map_err(|e| format!("tokio runtime: {e}"))?;
-    let event_loop = EventLoop::<AppEvent>::with_user_event()
-        .build()
-        .map_err(|e| format!("event loop: {e}"))?;
-    let mut handler =
-        TermrsWindow::with_selftest(config, layout_path, selftest, rt.handle().clone());
-    handler.server_addr = server_addr.map(|s| s.to_string());
-    handler.proxy = Some(event_loop.create_proxy());
-    event_loop
-        .run_app(&mut handler)
-        .map_err(|e| format!("run: {e}"))?;
-    // Detach without waiting: pane readers block in PTY reads until their
-    // shells exit, and dropping the runtime would stall on them instead of
-    // letting the process quit. The OS reclaims the threads on exit.
-    rt.shutdown_background();
-    match handler.error {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
 }

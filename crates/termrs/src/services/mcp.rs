@@ -33,6 +33,9 @@ use rust_mcp_sdk::schema::{
 use rust_mcp_sdk::{tool_box, McpServer};
 
 /// A request from an MCP tool to the UI thread.
+// File order (§7-module-map §3): §2 `McpQuery`/`McpReply`/`McpShared` types →
+// §4 `start_pane_mcp` entry → §5 `ServerHandler` dispatch + `ask`/`screen_text`
+// helpers → §6 tool structs (`tool_box!`) → §8 tests.
 pub struct McpQuery {
     pub pane_id: usize,
     pub kind: McpQueryKind,
@@ -117,9 +120,11 @@ pub struct PaneMcp {
 impl PaneMcp {
     /// Ask the server to stop (graceful write, bounded timeout). Idempotent.
     pub fn stop(&mut self) {
-        if let Some(tx) = self.stop_tx.take() {
-            let _ = tx.send(());
-        }
+        if let Some(tx) = self.stop_tx.take()
+            && tx.send(()).is_err() {
+                // Server task already gone: the idempotent-stop race.
+                log::debug!("mcp: stop signal dropped (already stopped)");
+            }
     }
 }
 
@@ -218,14 +223,21 @@ pub fn start_pane_mcp(
 
         match server.start_runtime().await {
             Ok(runtime) => {
-                let _ = ready_tx.send(Ok(()));
+                if ready_tx.send(Ok(())).is_err() {
+                    log::warn!("mcp: ready reply dropped (caller gave up)");
+                }
                 // Block this task until the pane closes, then drain in-flight
                 // requests before the task ends.
-                let _ = stop_rx.await;
+                if stop_rx.await.is_err() {
+                    // Stop handle dropped without stopping (pane closed).
+                    log::debug!("mcp: stop channel closed without signal");
+                }
                 runtime.graceful_shutdown(Some(Duration::from_secs(2)));
             }
             Err(e) => {
-                let _ = ready_tx.send(Err(e.to_string()));
+                if ready_tx.send(Err(e.to_string())).is_err() {
+                    log::warn!("mcp: startup-error reply dropped (caller gone)");
+                }
             }
         }
     });
@@ -673,5 +685,5 @@ tool_box!(
 );
 
 #[cfg(test)]
-#[path = "test/mcp_tests.rs"]
+#[path = "../test/mcp_tests.rs"]
 mod tests;

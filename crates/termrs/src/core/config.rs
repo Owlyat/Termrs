@@ -4,6 +4,12 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+// File order (§7-module-map §3): §2 section structs (`General`, `Window`,
+// `Theme`, `Keys`, `Ai`, …) each with its `Default` → §4 `Config::load`
+// entry → §6 `Theme::resolve` → §7 parse/merge helpers.
+
+// §2 Section structs.
+
 /// General emulator settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct General {
@@ -753,7 +759,9 @@ impl Config {
     /// `termrs.log` inside [`Config::state_dir`] (directory is created).
     pub fn log_path(&self) -> PathBuf {
         let dir = self.state_dir();
-        let _ = std::fs::create_dir_all(&dir);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log::warn!("cannot create state dir {}: {e}", dir.display());
+        }
         dir.join("termrs.log")
     }
 
@@ -1017,5 +1025,5 @@ fn join_lines(lines: &[String], trailing_newline: bool) -> String {
 }
 
 #[cfg(test)]
-#[path = "test/config_tests.rs"]
+#[path = "../test/config_tests.rs"]
 mod tests;

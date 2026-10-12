@@ -27,6 +27,10 @@ use crate::workspace::{Node, SplitDir};
 use std::sync::Arc;
 use std::sync::Mutex;
 
+// File order (§7-module-map §3): §4 `draw` entry → pane/status/menu helpers →
+// §6 overlays/fx → §7 pure helpers (`collect_*`). `draw` stays first so the
+// frame pipeline reads top-down.
+
 /// Draw whole app: menu bar, panes, prompt, overlays, fx transitions.
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let tick = app.frame_tick();
@@ -1339,5 +1343,5 @@ fn render_prompt(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 #[cfg(test)]
-#[path = "test/ui_tests.rs"]
+#[path = "../test/ui_tests.rs"]
 mod tests;

@@ -13,6 +13,10 @@ use ratatui::layout::Rect;
 use crate::layout::TreeLayout;
 use crate::pty::Pane;
 
+// File order (§7-module-map §3): §2 `SplitDir`/`Node`/`Workspace` types →
+// §4 `new`/`split`/`remove_leaf` entry ops → §5 focus/resize/zoom → §7
+// scoring/persistence helpers.
+
 /// Process-wide pane id allocator. Pane ids used to be per-workspace
 /// (`0, 1, ...` in every workspace), so any lookup by bare id
 /// (`find_pane`, MCP/share maps) always hit the first workspace.
@@ -54,13 +58,17 @@ pub enum Node {
 }
 
 impl Node {
-    /// Leaf ids in visual order.
+    /// Leaf ids in visual order (iterative: explicit stack, so deep trees
+    /// cannot overflow the call stack no matter how nested the layout is).
     pub fn leaves(&self, out: &mut Vec<usize>) {
-        match self {
-            Node::Pane(id) => out.push(*id),
-            Node::Split { first, second, .. } => {
-                first.leaves(out);
-                second.leaves(out);
+        let mut stack = vec![self];
+        while let Some(node) = stack.pop() {
+            match node {
+                Node::Pane(id) => out.push(*id),
+                Node::Split { first, second, .. } => {
+                    stack.push(second);
+                    stack.push(first);
+                }
             }
         }
     }
@@ -98,18 +106,33 @@ impl Node {
                     second,
                 }) = node.take()
                 else {
-                    unreachable!()
+                    // Provably dead (outer arm matched `Split`), but a logic
+                    // slip must degrade to "not found", never abort: the node
+                    // was already taken, so leave it empty and report misses.
+                    debug_assert!(false, "remove: split vanished under take");
+                    return false;
                 };
                 let mut a = Some(*first);
                 let mut b = Some(*second);
                 let found = Node::remove(&mut a, target) || Node::remove(&mut b, target);
                 if !found {
-                    *node = Some(Node::Split {
-                        dir,
-                        ratio,
-                        first: Box::new(a.unwrap()),
-                        second: Box::new(b.unwrap()),
-                    });
+                    // `!found` means neither side was touched, so both are
+                    // still `Some`; a slip here drops the split (logged)
+                    // instead of aborting the UI thread.
+                    match (a, b) {
+                        (Some(x), Some(y)) => {
+                            *node = Some(Node::Split {
+                                dir,
+                                ratio,
+                                first: Box::new(x),
+                                second: Box::new(y),
+                            });
+                        }
+                        _ => {
+                            log::error!("workspace: remove missed but lost a side; dropping split");
+                            *node = None;
+                        }
+                    }
                     return false;
                 }
                 match (a, b) {
@@ -192,6 +215,29 @@ impl Node {
             }
         }
     }
+}
+
+/// Maximum accepted nesting of a saved split tree. `Node::from_layout`
+/// recurses once per level, so an unchecked file could overflow the stack;
+/// 32 levels is far beyond any usable layout (each level halves a pane).
+/// Remaining `Node` recursion (`from_layout`, `replace`, `remove`,
+/// `tree_layout`) is therefore bounded by this cap at load plus one level
+/// per interactive split at runtime (human-rate: not a stack risk).
+const MAX_LAYOUT_DEPTH: usize = 32;
+
+/// Nesting depth of a saved tree (`Pane` = 0, each `Split` adds one).
+/// Iterative (explicit stack) so the validator itself cannot overflow.
+fn layout_depth(layout: &TreeLayout) -> usize {
+    let mut max = 0usize;
+    let mut stack = vec![(layout, 0usize)];
+    while let Some((node, depth)) = stack.pop() {
+        max = max.max(depth);
+        if let TreeLayout::Split { first, second, .. } = node {
+            stack.push((first, depth + 1));
+            stack.push((second, depth + 1));
+        }
+    }
+    max
 }
 
 /// One named tab: split tree + panes + status for the inbox.
@@ -279,6 +325,12 @@ impl Workspace {
         let mut panes = Vec::new();
         let mut next_id = 0usize;
         let mut dir_idx = 0usize;
+        let depth = layout_depth(layout);
+        if depth > MAX_LAYOUT_DEPTH {
+            return Err(format!(
+                "layout nesting too deep ({depth} > {MAX_LAYOUT_DEPTH}); refusing to restore"
+            ));
+        }
         let root = Node::from_layout(
             layout, &mut panes, &mut next_id, dirs, &mut dir_idx, shell, scrollback, rt, wake,
         )?;
@@ -556,10 +608,13 @@ impl Workspace {
         self.rects
             .iter()
             .find(|(_, r)| {
+                // Saturating: rect edges are `u16` and must never wrap
+                // (release builds panic on overflow per the workspace
+                // `[profile.*] overflow-checks` policy).
                 col >= r.x
-                    && col < r.x + r.width
+                    && col < r.x.saturating_add(r.width)
                     && row >= r.y
-                    && row < r.y + r.height
+                    && row < r.y.saturating_add(r.height)
             })
             .map(|(id, _)| *id)
     }
@@ -684,5 +739,5 @@ fn root_single(root: &Node) -> usize {
 }
 
 #[cfg(test)]
-#[path = "test/workspace_tests.rs"]
+#[path = "../test/workspace_tests.rs"]
 mod tests;

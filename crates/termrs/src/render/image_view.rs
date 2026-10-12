@@ -4,22 +4,13 @@
 //! pass (see `image_gpu.rs`) rather than emitting sixel/kitty sequences for an
 //! outer terminal to interpret.
 
+// File order (§7-module-map §3): §2 types → §4 `open` entry → §7 helpers.
+
 /// Decoded image: tightly packed RGBA8 pixels plus dimensions.
 pub struct Rgba {
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,
-}
-
-/// Decode an image file to RGBA.
-pub fn decode(path: &str) -> Result<Rgba, String> {
-    let img = image::open(path).map_err(|e| format!("{path}: {e}"))?;
-    let rgba = img.to_rgba8();
-    Ok(Rgba {
-        width: rgba.width(),
-        height: rgba.height(),
-        data: rgba.into_raw(),
-    })
 }
 
 /// One open overlay image: decoded RGBA bytes plus dimensions.
@@ -42,6 +33,19 @@ impl ImageView {
             rgba: rgba.data,
         })
     }
+}
+
+// §7 Helpers.
+
+/// Decode an image file to RGBA.
+pub fn decode(path: &str) -> Result<Rgba, String> {
+    let img = image::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let rgba = img.to_rgba8();
+    Ok(Rgba {
+        width: rgba.width(),
+        height: rgba.height(),
+        data: rgba.into_raw(),
+    })
 }
 
 /// Whether `name` has a raster-image extension we can decode.
