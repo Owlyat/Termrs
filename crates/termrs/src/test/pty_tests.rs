@@ -359,3 +359,87 @@
         );
         rt.shutdown_background();
     }
+
+    #[test]
+    fn grid_lines_ansi_encodes_fg_and_resets() {
+        let _guard = crate::pty::lock_pty_tests();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (wake, _rx) = crossbeam_channel::unbounded::<()>();
+        let mut pane = Pane::spawn(0, "", 200, rt.handle(), &wake).expect("spawn pane");
+        pane.feed_for_test(b"\x1b[31mRED\x1b[0m plain");
+        let plain = pane.grid_lines();
+        let ansi = pane.grid_lines_ansi();
+        pane.kill();
+        assert!(
+            plain[0].contains("RED plain"),
+            "plain keeps text: {:?}",
+            plain[0]
+        );
+        assert!(!plain[0].contains('\x1b'), "plain has no escapes");
+        assert!(
+            ansi[0].contains("\x1b[31mRED"),
+            "red SGR run: {:?}",
+            ansi[0]
+        );
+        assert!(
+            ansi[0].contains("plain"),
+            "text after reset kept: {:?}",
+            ansi[0]
+        );
+        assert!(
+            ansi[0].ends_with("\x1b[0m"),
+            "line reset at end: {:?}",
+            ansi[0]
+        );
+        rt.shutdown_background();
+    }
+
+    #[test]
+    fn grid_lines_ansi_plain_rows_have_no_escapes_and_trim() {
+        let _guard = crate::pty::lock_pty_tests();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (wake, _rx) = crossbeam_channel::unbounded::<()>();
+        let mut pane = Pane::spawn(0, "", 200, rt.handle(), &wake).expect("spawn pane");
+        pane.feed_for_test(b"hi");
+        let ansi = pane.grid_lines_ansi();
+        pane.kill();
+        assert_eq!(ansi[0], "hi", "uncolored row: no pad, no SGR");
+        assert!(
+            ansi.iter().skip(1).all(|l| l.is_empty()),
+            "blank rows are empty, not padded"
+        );
+        rt.shutdown_background();
+    }
+
+    #[test]
+    fn grid_lines_ansi_encodes_bg_bold_256_and_rgb() {
+        let _guard = crate::pty::lock_pty_tests();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (wake, _rx) = crossbeam_channel::unbounded::<()>();
+        let mut pane = Pane::spawn(0, "", 200, rt.handle(), &wake).expect("spawn pane");
+        pane.feed_for_test(b"\x1b[1;44mB\x1b[0m\r\n\x1b[38;5;200mC\x1b[0m\r\n\x1b[38;2;10;20;30mD\x1b[0m");
+        let ansi = pane.grid_lines_ansi();
+        pane.kill();
+        assert!(ansi[0].contains("\x1b["), "bold/bg SGR: {:?}", ansi[0]);
+        assert!(ansi[0].contains(";"), "combined params: {:?}", ansi[0]);
+        assert!(
+            ansi[1].contains("38;5;200"),
+            "256-color fg: {:?}",
+            ansi[1]
+        );
+        assert!(
+            ansi[2].contains("38;2;10;20;30"),
+            "truecolor fg: {:?}",
+            ansi[2]
+        );
+        rt.shutdown_background();
+    }

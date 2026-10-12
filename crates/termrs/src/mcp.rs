@@ -62,6 +62,7 @@ pub enum McpQueryKind {
     },
     Interrupt,
     Screen,
+    ScreenAnsi,
     Screenshot,
     Info,
 }
@@ -283,12 +284,9 @@ impl ServerHandler for PaneMcpHandler {
                 simple(&self.shared, McpQueryKind::Interrupt, "interrupt sent").await
             }
             PaneTools::GetScreenTool(t) => {
-                let _ = t;
-                match ask(&self.shared, McpQueryKind::Screen).await? {
-                    McpReply::Text(text) => {
-                        Ok(CallToolResult::text_content(vec![text_block(text)]))
-                    }
-                    _ => Err(CallToolError::from_message("pane returned no text")),
+                match screen_text(&self.shared, wants_ansi(t.format.as_deref())).await {
+                    Ok(text) => Ok(CallToolResult::text_content(vec![text_block(text)])),
+                    Err(e) => Err(e),
                 }
             }
             PaneTools::ScreenshotTool(t) => {
@@ -335,6 +333,26 @@ async fn ask(shared: &McpShared, kind: McpQueryKind) -> Result<McpReply, CallToo
         .map_err(|e| CallToolError::from_message(format!("pane did not answer: {e}")))
 }
 
+/// `"ansi"` (any case, surrounding whitespace ignored) requests SGR-colored
+/// screen text; anything else (including absent) means plain text.
+fn wants_ansi(format: Option<&str>) -> bool {
+    format.is_some_and(|f| f.trim().eq_ignore_ascii_case("ansi"))
+}
+
+/// Ask the UI thread for the screen in plain or ANSI form.
+async fn screen_text(shared: &McpShared, ansi: bool) -> Result<String, CallToolError> {
+    let kind = if ansi {
+        McpQueryKind::ScreenAnsi
+    } else {
+        McpQueryKind::Screen
+    };
+    match ask(shared, kind).await? {
+        McpReply::Text(text) => Ok(text),
+        McpReply::Err(e) => Err(CallToolError::from_message(e)),
+        _ => Err(CallToolError::from_message("pane returned no text")),
+    }
+}
+
 /// Fire-and-forget query that maps a success reply to a short text result.
 async fn simple(
     shared: &McpShared,
@@ -358,11 +376,9 @@ async fn run_command(
     }
     // Give the shell a moment to produce output, then return what is on screen.
     tokio::time::sleep(Duration::from_millis(250)).await;
-    match ask(shared, McpQueryKind::Screen).await {
-        Ok(McpReply::Text(text)) => Ok(CallToolResult::text_content(vec![TextContent::from(text)])),
-        Ok(_) => Ok(CallToolResult::text_content(vec![text_block(
-            "command sent".to_string(),
-        )])),
+    let ansi = wants_ansi(tool.format.as_deref());
+    match screen_text(shared, ansi).await {
+        Ok(text) => Ok(CallToolResult::text_content(vec![TextContent::from(text)])),
         Err(e) => Err(e),
     }
 }
@@ -397,10 +413,10 @@ async fn wait_screen(
 ) -> Result<CallToolResult, CallToolError> {
     let timeout = Duration::from_millis(tool.timeout_ms.unwrap_or(15_000).clamp(100, 120_000));
     let interval = Duration::from_millis(tool.interval_ms.unwrap_or(250).clamp(50, 5_000));
-    let before = match ask(shared, McpQueryKind::Screen).await? {
-        McpReply::Text(text) => text,
-        McpReply::Err(e) => return Err(CallToolError::from_message(e)),
-        _ => return Err(CallToolError::from_message("pane returned no text")),
+    let ansi = wants_ansi(tool.format.as_deref());
+    let before = match screen_text(shared, ansi).await {
+        Ok(text) => text,
+        Err(e) => return Err(e),
     };
     let start = std::time::Instant::now();
     loop {
@@ -411,12 +427,12 @@ async fn wait_screen(
             )));
         }
         tokio::time::sleep(interval).await;
-        match ask(shared, McpQueryKind::Screen).await? {
-            McpReply::Text(now) if now != before => {
+        match screen_text(shared, ansi).await {
+            Ok(now) if now != before => {
                 return Ok(CallToolResult::text_content(vec![TextContent::from(now)]));
             }
-            McpReply::Err(e) => return Err(CallToolError::from_message(e)),
-            _ => {}
+            Ok(_) => {}
+            Err(e) => return Err(e),
         }
     }
 }
@@ -488,7 +504,8 @@ async fn mouse_drag(
     name = "termrs_run_command",
     title = "Run a shell command in the pane",
     description = "Type a command into this pane's shell and press Enter, then return \
-                   the terminal contents after a short delay.",
+                   the terminal contents after a short delay. Set `format` to \"ansi\" \
+                   for ANSI SGR color escapes, otherwise plain text.",
     destructive_hint = true,
     open_world_hint = true
 )]
@@ -496,6 +513,9 @@ async fn mouse_drag(
 pub struct RunCommandTool {
     /// The full command line to run (without a trailing newline).
     pub command: String,
+    /// `"ansi"` for SGR-colored output, anything else (or omitted) for plain text.
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 #[mcp_tool(
@@ -583,11 +603,16 @@ pub struct InterruptTool {}
 #[mcp_tool(
     name = "termrs_get_screen",
     title = "Read the terminal screen",
-    description = "Return the current visible text of the pane as plain text.",
+    description = "Return the current visible text of the pane as plain text, or with \
+                   ANSI SGR color escapes when `format` is \"ansi\".",
     read_only_hint = true
 )]
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema, Default)]
-pub struct GetScreenTool {}
+pub struct GetScreenTool {
+    /// `"ansi"` for SGR-colored output, anything else (or omitted) for plain text.
+    #[serde(default)]
+    pub format: Option<String>,
+}
 
 #[mcp_tool(
     name = "termrs_screenshot",
@@ -613,7 +638,8 @@ pub struct PaneInfoTool {}
     title = "Wait for the screen to change",
     description = "Capture the current screen text, then hang until it differs and return \
                    the new text. Times out with an error if nothing changes in `timeout_ms` \
-                   (default 15000, max 120000). Polls every `interval_ms` (default 250).",
+                   (default 15000, max 120000). Polls every `interval_ms` (default 250). \
+                   Set `format` to \"ansi\" for ANSI SGR color escapes.",
     read_only_hint = true
 )]
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema)]
@@ -624,6 +650,9 @@ pub struct WaitScreenTool {
     /// Poll interval in milliseconds (50-5000, default 250).
     #[serde(default)]
     pub interval_ms: Option<u64>,
+    /// `"ansi"` for SGR-colored output, anything else (or omitted) for plain text.
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 // The generated enum mirrors the tool structs, so every variant shares the

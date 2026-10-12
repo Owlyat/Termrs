@@ -36,6 +36,9 @@
                                 McpReply::Text(format!("dragged {button:?}"))
                             }
                             McpQueryKind::Screen => McpReply::Text("SCREEN-CONTENT".into()),
+                            McpQueryKind::ScreenAnsi => {
+                                McpReply::Text("SCREEN-\x1b[31mRED\x1b[0m".into())
+                            }
                             McpQueryKind::Screenshot => {
                                 McpReply::Png(vec![0x89, 0x50, 0x4E, 0x47])
                             }
@@ -265,7 +268,7 @@
             let mut n = 0;
             while let Ok(q) = rx.recv_timeout(Duration::from_millis(5000)) {
                 let reply = match q.kind {
-                    McpQueryKind::Screen => {
+                    McpQueryKind::Screen | McpQueryKind::ScreenAnsi => {
                         n += 1;
                         if n < 3 {
                             McpReply::Text("BEFORE".into())
@@ -309,4 +312,68 @@
 
         drop(server);
         let _ = responder.join();
+    }
+
+    #[test]
+    fn wants_ansi_matches_loosely() {
+        assert!(wants_ansi(Some("ansi")));
+        assert!(wants_ansi(Some("ANSI")));
+        assert!(wants_ansi(Some("  ansi  ")));
+        assert!(!wants_ansi(None));
+        assert!(!wants_ansi(Some("text")));
+        assert!(!wants_ansi(Some("")));
+    }
+
+    /// `format: "ansi"` routes to `ScreenAnsi`; default stays plain.
+    #[test]
+    fn get_screen_format_selects_query() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let server = start_pane_mcp(rt.handle(), tx, 7, 0).expect("server starts");
+        let url = format!("http://127.0.0.1:{}/mcp", server.port);
+
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let responder = spawn_responder(rx, stop.clone());
+
+        let init = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "termrs-test", "version": "0.0" }
+            }
+        })
+        .to_string();
+        let (_, session) = post_rpc(&url, &init, None);
+        let session = session.expect("initialize returned a session id");
+        let ready = serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized"
+        })
+        .to_string();
+        let _ = post_rpc(&url, &ready, Some(&session));
+
+        let call = |id: i64, args: serde_json::Value| -> String {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": { "name": "termrs_get_screen", "arguments": args }
+            })
+            .to_string();
+            post_rpc(&url, &body, Some(&session)).0
+        };
+
+        let plain = call(3, serde_json::json!({}));
+        assert!(plain.contains("SCREEN-CONTENT"), "plain default: {plain}");
+        assert!(!plain.contains("u001b["), "plain has no SGR: {plain}");
+
+        let ansi = call(4, serde_json::json!({ "format": "ansi" }));
+        // JSON-RPC bodies escape ESC as \u001b, so match the escaped form.
+        assert!(ansi.contains("u001b[31mRED"), "ansi SGR: {ansi}");
+
+        stop.store(true, Ordering::Relaxed);
+        let _ = responder.join();
+        drop(server);
     }

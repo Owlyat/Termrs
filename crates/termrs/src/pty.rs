@@ -922,6 +922,167 @@ impl Pane {
         }
         out
     }
+
+    /// Visible grid as rows with ANSI SGR color/attribute escapes (for MCP
+    /// `format: "ansi"`). Same cells and widths as [`Pane::grid_lines`], but
+    /// runs with a non-default fg/bg or bold/dim/italic/underline/inverse are
+    /// wrapped in `\x1b[...m` (emitted only on change, reset at end of line).
+    /// Trailing blanks are trimmed, so blank lines are `""`; use the plain
+    /// sibling when exact padding/alignment matters.
+    pub fn grid_lines_ansi(&self) -> Vec<String> {
+        use unicode_width::UnicodeWidthStr;
+        let s = self.parser.screen();
+        let (rows, cols) = s.size();
+        let mut out = Vec::with_capacity(rows as usize);
+        for r in 0..rows {
+            // Last column holding real text: trailing blanks (even with a
+            // background color) are dropped to keep MCP payloads small.
+            let mut last: Option<u16> = None;
+            for c in 0..cols {
+                let Some(cell) = s.cell(r, c) else { continue };
+                if !cell.contents().is_empty() {
+                    last = Some(c);
+                }
+            }
+            let Some(last) = last else {
+                out.push(String::new());
+                continue;
+            };
+            let mut line = String::new();
+            let mut used = 0usize;
+            let mut cur_fg = vt100::Color::Default;
+            let mut cur_bg = vt100::Color::Default;
+            let mut cur_bold = false;
+            let mut cur_dim = false;
+            let mut cur_italic = false;
+            let mut cur_underline = false;
+            let mut cur_inverse = false;
+            let mut sgr_used = false;
+            for c in 0..=last {
+                let Some(cell) = s.cell(r, c) else { continue };
+                let text = cell.contents();
+                // Same blank handling as `grid_lines`: vt100 reports blank
+                // cells as "", emit a real space so columns stay aligned.
+                let (chunk, w) = if text.is_empty() {
+                    (" ", 1usize)
+                } else {
+                    (text, text.width().max(1))
+                };
+                if used + w > cols as usize {
+                    break;
+                }
+                let (fg, bg) = (cell.fgcolor(), cell.bgcolor());
+                let (bold, dim, italic, underline, inverse) = (
+                    cell.bold(),
+                    cell.dim(),
+                    cell.italic(),
+                    cell.underline(),
+                    cell.inverse(),
+                );
+                if (fg, bg, bold, dim, italic, underline, inverse)
+                    != (
+                        cur_fg,
+                        cur_bg,
+                        cur_bold,
+                        cur_dim,
+                        cur_italic,
+                        cur_underline,
+                        cur_inverse,
+                    )
+                {
+                    // Anything turning off (or a color back to default) needs
+                    // a reset first, then re-apply: SGR has no single "clear
+                    // attrs but keep colors" code.
+                    let need_reset = (cur_bold && !bold)
+                        || (cur_dim && !dim)
+                        || (cur_italic && !italic)
+                        || (cur_underline && !underline)
+                        || (cur_inverse && !inverse)
+                        || (cur_fg != vt100::Color::Default
+                            && fg == vt100::Color::Default)
+                        || (cur_bg != vt100::Color::Default
+                            && bg == vt100::Color::Default);
+                    if need_reset {
+                        line.push_str("\x1b[0m");
+                        cur_fg = vt100::Color::Default;
+                        cur_bg = vt100::Color::Default;
+                        cur_bold = false;
+                        cur_dim = false;
+                        cur_italic = false;
+                        cur_underline = false;
+                        cur_inverse = false;
+                    }
+                    let mut params: Vec<String> = Vec::new();
+                    if fg != cur_fg {
+                        push_color_param(&mut params, fg, false);
+                    }
+                    if bg != cur_bg {
+                        push_color_param(&mut params, bg, true);
+                    }
+                    if bold && !cur_bold {
+                        params.push("1".to_string());
+                    }
+                    if dim && !cur_dim {
+                        params.push("2".to_string());
+                    }
+                    if italic && !cur_italic {
+                        params.push("3".to_string());
+                    }
+                    if underline && !cur_underline {
+                        params.push("4".to_string());
+                    }
+                    if inverse && !cur_inverse {
+                        params.push("7".to_string());
+                    }
+                    if !params.is_empty() {
+                        line.push_str("\x1b[");
+                        line.push_str(&params.join(";"));
+                        line.push('m');
+                        sgr_used = true;
+                    }
+                    cur_fg = fg;
+                    cur_bg = bg;
+                    cur_bold = bold;
+                    cur_dim = dim;
+                    cur_italic = italic;
+                    cur_underline = underline;
+                    cur_inverse = inverse;
+                }
+                line.push_str(chunk);
+                used += w;
+            }
+            if sgr_used {
+                line.push_str("\x1b[0m");
+            }
+            out.push(line);
+        }
+        out
+    }
+}
+
+/// Append one SGR color selector for `color` (`38;…` fg, `48;…` bg).
+/// `Default` emits nothing: callers reset instead.
+fn push_color_param(params: &mut Vec<String>, color: vt100::Color, bg: bool) {
+    match color {
+        vt100::Color::Default => {}
+        vt100::Color::Idx(i) => {
+            if i < 8 {
+                params.push(format!("{}", (if bg { 40 } else { 30 }) + i as u16));
+            } else if i < 16 {
+                params.push(format!(
+                    "{}",
+                    (if bg { 100 } else { 90 }) + (i - 8) as u16
+                ));
+            } else {
+                let base = if bg { 48 } else { 38 };
+                params.push(format!("{base};5;{i}"));
+            }
+        }
+        vt100::Color::Rgb(r, g, b) => {
+            let base = if bg { 48 } else { 38 };
+            params.push(format!("{base};2;{r};{g};{b}"));
+        }
+    }
 }
 
 /// Serializes tests that spawn real shells: parallel ConPTY + `cmd.exe`

@@ -2457,6 +2457,10 @@ impl App {
                 Some(p) => R::Text(p.grid_lines().join("\n")),
                 None => R::Err(format!("pane {pane_id} is gone")),
             },
+            K::ScreenAnsi => match self.find_pane(pane_id) {
+                Some(p) => R::Text(p.grid_lines_ansi().join("\n")),
+                None => R::Err(format!("pane {pane_id} is gone")),
+            },
             K::Screenshot => {
                 let png = self.screenshot_pane(pane_id);
                 if png.is_empty() {
