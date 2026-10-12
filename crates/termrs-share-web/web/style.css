@@ -60,6 +60,38 @@ main {
   display: inline-block;
 }
 
+/* Virtual special-key bar (phones lack Ctrl/Tab/Esc/arrows). */
+#keys {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-top: 1px solid #26262f;
+}
+
+#keys button {
+  flex: 0 0 auto;
+  min-width: 48px;
+  min-height: 38px;
+  background: #0e0e13;
+  border: 1px solid #2c2c38;
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+#keys button:active {
+  background: #26262f;
+}
+
+#keys button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 dialog {
   border: 1px solid #2c2c38;
   border-radius: 10px;
