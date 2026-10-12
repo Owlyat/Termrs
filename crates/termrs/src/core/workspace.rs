@@ -74,6 +74,8 @@ impl Node {
     }
 
     /// Replace leaf `target` with `replacement`. True when replaced.
+    /// No clone: `contains` steers `replacement` (by value) to the side
+    /// that holds `target`, so the move happens exactly once.
     fn replace(&mut self, target: usize, replacement: Node) -> bool {
         match self {
             Node::Pane(id) if *id == target => {
@@ -82,7 +84,11 @@ impl Node {
             }
             Node::Pane(_) => false,
             Node::Split { first, second, .. } => {
-                first.replace(target, replacement.clone()) || second.replace(target, replacement)
+                if contains(first, target) {
+                    first.replace(target, replacement)
+                } else {
+                    second.replace(target, replacement)
+                }
             }
         }
     }
@@ -619,16 +625,19 @@ impl Workspace {
             .map(|(id, _)| *id)
     }
 
-    /// Focus the nearest pane in `dir`. A focus key both restores a
-    /// maximized pane and moves: geometry comes from the last tiled layout
-    /// in that case, since the cached draw rects only hold the zoomed pane.
-    /// Returns the new focus, or `None` when nothing lies that way
-    /// (or rects are not known yet).
+    /// Focus the adjacent pane in `dir` (wezterm `ActivatePaneDirection`).
+    /// Only an edge-adjacent pane with orthogonal overlap qualifies: far
+    /// panes never qualify, there is no wrap. Ties break toward the most
+    /// recently focused candidate (wezterm `Recency`), then smallest center
+    /// offset. A focus key both restores a maximized pane and moves:
+    /// geometry comes from the last tiled layout in that case, since the
+    /// cached draw rects only hold the zoomed pane. Returns the new focus,
+    /// or `None` when nothing lies that way (or rects are not known yet).
     pub fn focus_direction(&mut self, dir: Direction) -> Option<usize> {
         let from_zoom = self.unzoom();
         let map = if from_zoom { &self.tiled } else { &self.rects };
         let cur = *map.get(&self.focused)?;
-        let mut best: Option<(usize, (i32, i32), u64)> = None;
+        let mut best: Option<(usize, u64, i32)> = None;
         for id in self.leaf_ids() {
             if id == self.focused {
                 continue;
@@ -636,22 +645,33 @@ impl Workspace {
             let Some(r) = map.get(&id).copied() else {
                 continue;
             };
-            if !beyond(cur, r, dir) {
+            if !adjacent(cur, r, dir) {
                 continue;
             }
-            let s = score(cur, r, dir);
             let seen = self.last_seen.get(&id).copied().unwrap_or(0);
+            let offset = center_offset(cur, r, dir);
             let better = match best {
                 None => true,
-                Some((_, bs, bseen)) => s < bs || (s == bs && seen > bseen),
+                Some((_, bseen, boff)) => seen > bseen || (seen == bseen && offset < boff),
             };
             if better {
-                best = Some((id, s, seen));
+                best = Some((id, seen, offset));
             }
         }
         let (best, _, _) = best?;
         self.set_focused(best);
         Some(best)
+    }
+
+    /// Focus the pane at visual index `idx` (wezterm `ActivatePaneByIndex`).
+    /// Index order is the split-tree leaf order. Out-of-range indices are
+    /// ignored (return `None`), matching wezterm.
+    pub fn focus_by_index(&mut self, idx: usize) -> Option<usize> {
+        let ids = self.leaf_ids();
+        let id = *ids.get(idx)?;
+        self.unzoom();
+        self.set_focused(id);
+        Some(id)
     }
 
     /// Grow the focused pane toward `dir` by `delta` (0..1 of the split),
@@ -665,27 +685,34 @@ impl Workspace {
     }
 }
 
-/// Whether `r` lies strictly beyond `cur` toward `dir`.
-fn beyond(cur: Rect, r: Rect, dir: Direction) -> bool {
+/// Whether `r` is edge-adjacent to `cur` toward `dir` with orthogonal
+/// overlap (wezterm `get_pane_direction`). Termrs tiles rects with no
+/// divider cell (wezterm uses `+1`), so adjacency is a gap of 0; a gap of
+/// 1 is tolerated for percentage-split rounding. Far panes never qualify.
+fn adjacent(cur: Rect, r: Rect, dir: Direction) -> bool {
     let (cx, cy, cw, ch) = (cur.x as i32, cur.y as i32, cur.width as i32, cur.height as i32);
     let (x, y, w, h) = (r.x as i32, r.y as i32, r.width as i32, r.height as i32);
     match dir {
-        Direction::Left => x + w <= cx + 1,
-        Direction::Right => x >= cx + cw - 1,
-        Direction::Up => y + h <= cy + 1,
-        Direction::Down => y >= cy + ch - 1,
+        Direction::Left => matches!(cx - (x + w), 0 | 1) && overlap(cy, ch, y, h),
+        Direction::Right => matches!(x - (cx + cw), 0 | 1) && overlap(cy, ch, y, h),
+        Direction::Up => matches!(cy - (y + h), 0 | 1) && overlap(cx, cw, x, w),
+        Direction::Down => matches!(y - (cy + ch), 0 | 1) && overlap(cx, cw, x, w),
     }
 }
 
-/// (primary gap, secondary center offset): smaller wins.
-fn score(cur: Rect, r: Rect, dir: Direction) -> (i32, i32) {
+/// True when 1D ranges `[a, a+len)` and `[b, b+len)` overlap.
+fn overlap(a: i32, alen: i32, b: i32, blen: i32) -> bool {
+    a.max(b) < (a + alen).min(b + blen)
+}
+
+/// Secondary tie-break: absolute center offset on the orthogonal axis.
+/// Smaller wins; only used when recency ties.
+fn center_offset(cur: Rect, r: Rect, dir: Direction) -> i32 {
     let (cx, cy, cw, ch) = (cur.x as i32, cur.y as i32, cur.width as i32, cur.height as i32);
     let (x, y, w, h) = (r.x as i32, r.y as i32, r.width as i32, r.height as i32);
     match dir {
-        Direction::Left => (cx - (x + w), ((cy + ch / 2) - (y + h / 2)).abs()),
-        Direction::Right => ((x - (cx + cw)), ((cy + ch / 2) - (y + h / 2)).abs()),
-        Direction::Up => ((cy - (y + h)), ((cx + cw / 2) - (x + w / 2)).abs()),
-        Direction::Down => ((y - (cy + ch)), ((cx + cw / 2) - (x + w / 2)).abs()),
+        Direction::Left | Direction::Right => ((cy + ch / 2) - (y + h / 2)).abs(),
+        Direction::Up | Direction::Down => ((cx + cw / 2) - (x + w / 2)).abs(),
     }
 }
 

@@ -927,13 +927,11 @@ pub fn which_tool(name: &str) -> Option<std::path::PathBuf> {
         }
         #[cfg(windows)]
         for ext in pathext() {
-            let p = candidate.with_extension(ext.trim_start_matches('.'));
             // `with_extension` replaces; instead append when missing.
             let appended = std::path::PathBuf::from(format!("{first}{ext}"));
             if appended.is_file() {
                 return Some(appended);
             }
-            let _ = p;
         }
         return None;
     }
@@ -953,8 +951,6 @@ pub fn which_tool(name: &str) -> Option<std::path::PathBuf> {
                 return Some(p);
             }
         }
-        #[cfg(not(windows))]
-        let _ = ();
     }
     None
 }

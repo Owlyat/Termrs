@@ -370,21 +370,21 @@ pub struct Keys {
     pub workspace_prev: Vec<String>,
     #[serde(default = "k_help", deserialize_with = "string_or_list")]
     pub help: Vec<String>,
-    #[serde(default = "k_empty", deserialize_with = "string_or_list")]
+    #[serde(default = "k_focus_left", deserialize_with = "string_or_list")]
     pub focus_left: Vec<String>,
-    #[serde(default = "k_empty", deserialize_with = "string_or_list")]
+    #[serde(default = "k_focus_right", deserialize_with = "string_or_list")]
     pub focus_right: Vec<String>,
-    #[serde(default = "k_empty", deserialize_with = "string_or_list")]
+    #[serde(default = "k_focus_up", deserialize_with = "string_or_list")]
     pub focus_up: Vec<String>,
-    #[serde(default = "k_empty", deserialize_with = "string_or_list")]
+    #[serde(default = "k_focus_down", deserialize_with = "string_or_list")]
     pub focus_down: Vec<String>,
-    #[serde(default = "k_empty", deserialize_with = "string_or_list")]
+    #[serde(default = "k_resize_left", deserialize_with = "string_or_list")]
     pub resize_left: Vec<String>,
-    #[serde(default = "k_empty", deserialize_with = "string_or_list")]
+    #[serde(default = "k_resize_right", deserialize_with = "string_or_list")]
     pub resize_right: Vec<String>,
-    #[serde(default = "k_empty", deserialize_with = "string_or_list")]
+    #[serde(default = "k_resize_up", deserialize_with = "string_or_list")]
     pub resize_up: Vec<String>,
-    #[serde(default = "k_empty", deserialize_with = "string_or_list")]
+    #[serde(default = "k_resize_down", deserialize_with = "string_or_list")]
     pub resize_down: Vec<String>,
     #[serde(default = "k_zoom_in", deserialize_with = "string_or_list")]
     pub zoom_in: Vec<String>,
@@ -481,8 +481,38 @@ fn k_help() -> Vec<String> {
     vec!["f1".into()]
 }
 
-fn k_empty() -> Vec<String> {
-    Vec::new()
+/// wezterm `ActivatePaneDirection`: `ctrl+shift+<arrow>`.
+fn k_focus_left() -> Vec<String> {
+    vec!["ctrl+shift+left".into()]
+}
+
+fn k_focus_right() -> Vec<String> {
+    vec!["ctrl+shift+right".into()]
+}
+
+fn k_focus_up() -> Vec<String> {
+    vec!["ctrl+shift+up".into()]
+}
+
+fn k_focus_down() -> Vec<String> {
+    vec!["ctrl+shift+down".into()]
+}
+
+/// wezterm `AdjustPaneSize`: `ctrl+shift+alt+<arrow>`.
+fn k_resize_left() -> Vec<String> {
+    vec!["ctrl+shift+alt+left".into()]
+}
+
+fn k_resize_right() -> Vec<String> {
+    vec!["ctrl+shift+alt+right".into()]
+}
+
+fn k_resize_up() -> Vec<String> {
+    vec!["ctrl+shift+alt+up".into()]
+}
+
+fn k_resize_down() -> Vec<String> {
+    vec!["ctrl+shift+alt+down".into()]
 }
 
 fn k_zoom_in() -> Vec<String> {
@@ -545,14 +575,14 @@ impl Default for Keys {
             workspace_next: k_ws_next(),
             workspace_prev: k_ws_prev(),
             help: k_help(),
-            focus_left: k_empty(),
-            focus_right: k_empty(),
-            focus_up: k_empty(),
-            focus_down: k_empty(),
-            resize_left: k_empty(),
-            resize_right: k_empty(),
-            resize_up: k_empty(),
-            resize_down: k_empty(),
+            focus_left: k_focus_left(),
+            focus_right: k_focus_right(),
+            focus_up: k_focus_up(),
+            focus_down: k_focus_down(),
+            resize_left: k_resize_left(),
+            resize_right: k_resize_right(),
+            resize_up: k_resize_up(),
+            resize_down: k_resize_down(),
             zoom_in: k_zoom_in(),
             zoom_out: k_zoom_out(),
             zoom_reset: k_zoom_reset(),
@@ -638,6 +668,10 @@ pub struct Mouse {
     /// falls back to ctrl.
     #[serde(default = "default_url_mod")]
     pub url_mod: String,
+    /// Focus the pane under the pointer on hover (wezterm
+    /// `pane_focus_follows_mouse`, default `false`: only clicks focus).
+    #[serde(default)]
+    pub focus_follows_mouse: bool,
 }
 
 fn default_url_mod() -> String {
@@ -649,6 +683,25 @@ impl Default for Mouse {
         Self {
             enabled: true,
             url_mod: default_url_mod(),
+            focus_follows_mouse: false,
+        }
+    }
+}
+
+/// Pane focus settings (wezterm parity).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pane {
+    /// Directional focus / cycling restores a maximized pane before moving
+    /// (wezterm `unzoom_on_switch_pane`, default `true`). `false` = focus
+    /// keys do nothing while zoomed.
+    #[serde(default = "default_true")]
+    pub unzoom_on_switch_pane: bool,
+}
+
+impl Default for Pane {
+    fn default() -> Self {
+        Self {
+            unzoom_on_switch_pane: true,
         }
     }
 }
@@ -713,6 +766,8 @@ pub struct Config {
     pub mouse: Mouse,
     #[serde(default)]
     pub share: Share,
+    #[serde(default)]
+    pub pane: Pane,
     /// Path this config was loaded from (not serialized).
     #[serde(skip)]
     pub source: Option<PathBuf>,
@@ -732,6 +787,7 @@ impl Config {
             macros: Vec::new(),
             mouse: Mouse::default(),
             share: Share::default(),
+            pane: Pane::default(),
             source: None,
         })
         .unwrap_or_default()
@@ -907,6 +963,7 @@ impl Config {
             macros: Vec::new(),
             mouse: Mouse::default(),
             share: Share::default(),
+            pane: Pane::default(),
             source: None,
         }
     }
@@ -927,6 +984,7 @@ impl Config {
             macros: Vec::new(),
             mouse: Mouse::default(),
                     share: Share::default(),
+            pane: Pane::default(),
                     source: Some(path.to_path_buf()),
                 };
             }
@@ -952,6 +1010,7 @@ impl Config {
             macros: Vec::new(),
             mouse: Mouse::default(),
                     share: Share::default(),
+            pane: Pane::default(),
                     source: Some(path.to_path_buf()),
                 }
             }

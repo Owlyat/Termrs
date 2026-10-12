@@ -291,8 +291,7 @@ impl ServerHandler for PaneMcpHandler {
             PaneTools::PressKeyTool(t) => press_key(&self.shared, t).await,
             PaneTools::MouseClickTool(t) => mouse_click(&self.shared, t).await,
             PaneTools::MouseDragTool(t) => mouse_drag(&self.shared, t).await,
-            PaneTools::InterruptTool(t) => {
-                let _ = t;
+            PaneTools::InterruptTool(_) => {
                 simple(&self.shared, McpQueryKind::Interrupt, "interrupt sent").await
             }
             PaneTools::GetScreenTool(t) => {
@@ -301,8 +300,7 @@ impl ServerHandler for PaneMcpHandler {
                     Err(e) => Err(e),
                 }
             }
-            PaneTools::ScreenshotTool(t) => {
-                let _ = t;
+            PaneTools::ScreenshotTool(_) => {
                 match ask(&self.shared, McpQueryKind::Screenshot).await? {
                     McpReply::Png(png) => {
                         let data = base64::engine::general_purpose::STANDARD.encode(&png);
@@ -316,8 +314,7 @@ impl ServerHandler for PaneMcpHandler {
                     _ => Err(CallToolError::from_message("pane returned no image")),
                 }
             }
-            PaneTools::PaneInfoTool(t) => {
-                let _ = t;
+            PaneTools::PaneInfoTool(_) => {
                 match ask(&self.shared, McpQueryKind::Info).await? {
                     McpReply::Text(text) => {
                         Ok(CallToolResult::text_content(vec![text_block(text)]))

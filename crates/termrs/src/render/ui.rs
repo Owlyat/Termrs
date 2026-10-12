@@ -245,6 +245,8 @@ fn render_about(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(banner, rows[0]);
     let hints = format!(
         "panes     : {} split-h | {} split-v | {} close | {} zoom | {}/{} focus\n\
+         panes-dir : {}/{}/{}/{} focus left/right/up/down (wezterm ActivatePaneDirection)\n\
+         panes-rsz: {}/{}/{}/{} resize | palette > \"Focus pane 1..9\" (wezterm ActivatePaneByIndex)\n\
          workspace : {} new | {}/{} prev/next | {} inbox menu\n\
          view      : {} scrollback | {} image | {} this help | {} quit\n\
          copy      : {} yank last command output | {} select mode\n\
@@ -276,6 +278,14 @@ fn render_about(frame: &mut Frame, app: &App, area: Rect) {
         k.pane_zoom.join("/"),
         k.focus_next.join("/"),
         k.focus_prev.join("/"),
+        k.focus_left.join("/"),
+        k.focus_right.join("/"),
+        k.focus_up.join("/"),
+        k.focus_down.join("/"),
+        k.resize_left.join("/"),
+        k.resize_right.join("/"),
+        k.resize_up.join("/"),
+        k.resize_down.join("/"),
         k.workspace_new.join("/"),
         k.workspace_prev.join("/"),
         k.workspace_next.join("/"),

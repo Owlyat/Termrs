@@ -447,7 +447,7 @@ impl PostProcessor for ImagePostProcessor {
         let format = surface_config.format;
         let ProcessorUserData {
             braille: braille_dots,
-            clear: bg,
+            clear: _bg,
             bg: bg_u8,
         } = user_data;
         let premultiplied = surface_config.alpha_mode
@@ -494,7 +494,6 @@ impl PostProcessor for ImagePostProcessor {
                 a: 1.0,
             }
         };
-        let _ = bg;
         Self {
             device: device.clone(),
             queue: None,

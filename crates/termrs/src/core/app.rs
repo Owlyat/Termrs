@@ -171,6 +171,7 @@ pub enum Command {
     FocusRight,
     FocusUp,
     FocusDown,
+    FocusPaneByIndex(usize),
     ResizeLeft,
     ResizeRight,
     ResizeUp,
@@ -221,6 +222,15 @@ impl Command {
         (Command::FocusRight, "Focus pane right"),
         (Command::FocusUp, "Focus pane up"),
         (Command::FocusDown, "Focus pane down"),
+        (Command::FocusPaneByIndex(0), "Focus pane 1"),
+        (Command::FocusPaneByIndex(1), "Focus pane 2"),
+        (Command::FocusPaneByIndex(2), "Focus pane 3"),
+        (Command::FocusPaneByIndex(3), "Focus pane 4"),
+        (Command::FocusPaneByIndex(4), "Focus pane 5"),
+        (Command::FocusPaneByIndex(5), "Focus pane 6"),
+        (Command::FocusPaneByIndex(6), "Focus pane 7"),
+        (Command::FocusPaneByIndex(7), "Focus pane 8"),
+        (Command::FocusPaneByIndex(8), "Focus pane 9"),
         (Command::ResizeLeft, "Resize pane left"),
         (Command::ResizeRight, "Resize pane right"),
         (Command::ResizeUp, "Resize pane up"),
@@ -2275,7 +2285,6 @@ impl App {
             for x in 0..width {
                 let cell = screen.cell(y as u16, x as u16);
                 let fg = cell.map(|c| c.fgcolor()).unwrap_or(vt100::Color::Default);
-                let bg = cell.map(|c| c.bgcolor()).unwrap_or(vt100::Color::Default);
                 let color = match fg {
                     vt100::Color::Default => [0, 0, 0, 255],
                     vt100::Color::Idx(i) => {
@@ -2301,7 +2310,6 @@ impl App {
                     }
                     vt100::Color::Rgb(r, g, b) => [r, g, b, 255],
                 };
-                let _ = bg;
                 img.put_pixel(x, y, image::Rgba(color));
             }
         }
@@ -3146,40 +3154,42 @@ impl App {
 
     /// Binding table: config key specs -> command, in priority order.
     /// Single source of truth shared with the palette and tests.
-    fn keymap(&self) -> Vec<(Vec<String>, Command)> {
+    /// Borrows the config (no per-keystroke `Vec` clones: `lookup_command`
+    /// runs on every key press).
+    fn keymap(&self) -> Vec<(&[String], Command)> {
         let k = &self.config.keys;
         vec![
-            (k.yank_last.clone(), Command::YankLast),
-            (k.select_mode.clone(), Command::SelectMode),
-            (k.edit_config.clone(), Command::EditConfig),
-            (k.command_palette.clone(), Command::CommandPalette),
-            (k.command_save.clone(), Command::SaveCommand),
-            (k.commands_picker.clone(), Command::Commands),
-            (k.paste.clone(), Command::Paste),
-            (k.quit.clone(), Command::Quit),
-            (k.split_horizontal.clone(), Command::SplitHorizontal),
-            (k.split_vertical.clone(), Command::SplitVertical),
-            (k.close_pane.clone(), Command::ClosePane),
-            (k.pane_zoom.clone(), Command::ZoomPane),
-            (k.focus_next.clone(), Command::FocusNext),
-            (k.focus_prev.clone(), Command::FocusPrev),
-            (k.focus_left.clone(), Command::FocusLeft),
-            (k.focus_right.clone(), Command::FocusRight),
-            (k.focus_up.clone(), Command::FocusUp),
-            (k.focus_down.clone(), Command::FocusDown),
-            (k.resize_left.clone(), Command::ResizeLeft),
-            (k.resize_right.clone(), Command::ResizeRight),
-            (k.resize_up.clone(), Command::ResizeUp),
-            (k.resize_down.clone(), Command::ResizeDown),
-            (k.zoom_in.clone(), Command::ZoomIn),
-            (k.zoom_out.clone(), Command::ZoomOut),
-            (k.zoom_reset.clone(), Command::ZoomReset),
-            (k.view_image.clone(), Command::Image),
-            (k.workspace_menu.clone(), Command::Inbox),
-            (k.workspace_new.clone(), Command::NewWorkspace),
-            (k.workspace_next.clone(), Command::WorkspaceNext),
-            (k.workspace_prev.clone(), Command::WorkspacePrev),
-            (k.scroll_view.clone(), Command::Scrollback),
+            (k.yank_last.as_slice(), Command::YankLast),
+            (k.select_mode.as_slice(), Command::SelectMode),
+            (k.edit_config.as_slice(), Command::EditConfig),
+            (k.command_palette.as_slice(), Command::CommandPalette),
+            (k.command_save.as_slice(), Command::SaveCommand),
+            (k.commands_picker.as_slice(), Command::Commands),
+            (k.paste.as_slice(), Command::Paste),
+            (k.quit.as_slice(), Command::Quit),
+            (k.split_horizontal.as_slice(), Command::SplitHorizontal),
+            (k.split_vertical.as_slice(), Command::SplitVertical),
+            (k.close_pane.as_slice(), Command::ClosePane),
+            (k.pane_zoom.as_slice(), Command::ZoomPane),
+            (k.focus_next.as_slice(), Command::FocusNext),
+            (k.focus_prev.as_slice(), Command::FocusPrev),
+            (k.focus_left.as_slice(), Command::FocusLeft),
+            (k.focus_right.as_slice(), Command::FocusRight),
+            (k.focus_up.as_slice(), Command::FocusUp),
+            (k.focus_down.as_slice(), Command::FocusDown),
+            (k.resize_left.as_slice(), Command::ResizeLeft),
+            (k.resize_right.as_slice(), Command::ResizeRight),
+            (k.resize_up.as_slice(), Command::ResizeUp),
+            (k.resize_down.as_slice(), Command::ResizeDown),
+            (k.zoom_in.as_slice(), Command::ZoomIn),
+            (k.zoom_out.as_slice(), Command::ZoomOut),
+            (k.zoom_reset.as_slice(), Command::ZoomReset),
+            (k.view_image.as_slice(), Command::Image),
+            (k.workspace_menu.as_slice(), Command::Inbox),
+            (k.workspace_new.as_slice(), Command::NewWorkspace),
+            (k.workspace_next.as_slice(), Command::WorkspaceNext),
+            (k.workspace_prev.as_slice(), Command::WorkspacePrev),
+            (k.scroll_view.as_slice(), Command::Scrollback),
         ]
     }
 
@@ -3695,9 +3705,14 @@ impl App {
         }
     }
 
-    /// Cycle pane focus forward/backward in current workspace.
-    /// While zoomed this also restores the layout first (focus still moves).
+    /// Cycle pane focus forward/backward in current workspace (wezterm
+    /// `ActivatePaneDirection(Next/Prev)`: preorder leaf order, wraps).
+    /// While zoomed this also restores the layout first unless
+    /// `[pane] unzoom_on_switch_pane = false` (wezterm parity).
     fn cycle(&mut self, dir: i32) {
+        if self.ws().zoomed().is_some() && !self.config.pane.unzoom_on_switch_pane {
+            return;
+        }
         let was_zoomed = self.ws_mut().unzoom();
         let id = self.ws_mut().cycle(dir);
         if was_zoomed {
@@ -3706,11 +3721,15 @@ impl App {
         self.queue_fx(id, FxKind::Focus);
     }
 
-    /// Focus the nearest pane in `dir` (wezterm ActivatePaneDirection).
+    /// Focus the adjacent pane in `dir` (wezterm ActivatePaneDirection).
     /// While zoomed this restores the layout and moves in one press (the
     /// workspace falls back to tiled geometry); with nothing that way it
-    /// just restores.
+    /// just restores. Honors `[pane] unzoom_on_switch_pane` (wezterm
+    /// `unzoom_on_switch_pane`, default true).
     fn focus_direction(&mut self, dir: Direction) {
+        if self.ws().zoomed().is_some() && !self.config.pane.unzoom_on_switch_pane {
+            return;
+        }
         let was_zoomed = self.ws().zoomed().is_some();
         match self.ws_mut().focus_direction(dir) {
             Some(id) => {
@@ -3725,6 +3744,17 @@ impl App {
                 self.queue_fx(id, FxKind::Focus);
             }
             None => {}
+        }
+    }
+
+    /// Focus the pane at visual index `idx` (wezterm `ActivatePaneByIndex`).
+    /// Out-of-range indices are ignored.
+    fn focus_by_index(&mut self, idx: usize) {
+        if self.ws().zoomed().is_some() && !self.config.pane.unzoom_on_switch_pane {
+            return;
+        }
+        if let Some(id) = self.ws_mut().focus_by_index(idx) {
+            self.queue_fx(id, FxKind::Focus);
         }
     }
 
@@ -4640,6 +4670,7 @@ impl App {
             Command::FocusRight => self.focus_direction(Direction::Right),
             Command::FocusUp => self.focus_direction(Direction::Up),
             Command::FocusDown => self.focus_direction(Direction::Down),
+            Command::FocusPaneByIndex(i) => self.focus_by_index(i),
             Command::ResizeLeft => self.resize_focused(Direction::Left),
             Command::ResizeRight => self.resize_focused(Direction::Right),
             Command::ResizeUp => self.resize_focused(Direction::Up),
@@ -5049,6 +5080,11 @@ impl App {
         if !self.config.mouse.enabled || self.mode() != Mode::Normal {
             return false;
         }
+        // wezterm `pane_focus_follows_mouse`: hover focuses the pane under
+        // the cursor (clicks always focus via `focus_pane_at`).
+        if self.config.mouse.focus_follows_mouse {
+            self.focus_pane_at(col, row);
+        }
         let Some((id, c, r)) = self.inner_at(col, row) else {
             self.last_mouse_cell = None;
             return false;
@@ -5323,36 +5359,36 @@ impl App {
             return;
         };
 
-        // Helix-style multi-key prefixes: `m` (match) and `g` (goto).
-        if let Some(p) = sel.pending.take() {
-            if let Key::Char(ch) = ev.key {
-                match (p, ch) {
-                    ('m', 'i') => sel.pending = Some('i'),
-                    ('m', 'a') => sel.pending = Some('a'),
-                    ('m', 'm') => sel.match_bracket(),
-                    ('i', o) => sel.select_object(o, true),
-                    ('a', o) => sel.select_object(o, false),
-                    ('f', c) => sel.find_char(c, true),
-                    ('F', c) => sel.find_char(c, false),
-                    ('t', c) => sel.find_till(c, true),
-                    ('T', c) => sel.find_till(c, false),
-                    ('g', c) => {
-                        sel.goto(c);
-                    }
-                    _ => {}
-                }
+        // Helix-style multi-key prefixes (`m` match, `g` goto) and `Alt-;`
+        // run under a scoped borrow: vertical motions below may scroll the
+        // pane, which needs `&mut self` for the snapshot refresh.
+        {
+            // `Alt-;` flips the selection ends (helix); plain `;` collapses.
+            if matches!(ev.key, Key::Char(';')) && ev.mods.contains(Mods::ALT) {
+                sel.swap_ends();
+                return;
             }
-            return;
+            if let Some(p) = sel.pending.take() {
+                if let Key::Char(ch) = ev.key {
+                    match (p, ch) {
+                        ('m', 'i') => sel.pending = Some('i'),
+                        ('m', 'a') => sel.pending = Some('a'),
+                        ('m', 'm') => sel.match_bracket(),
+                        ('i', o) => sel.select_object(o, true),
+                        ('a', o) => sel.select_object(o, false),
+                        ('f', c) => sel.find_char(c, true),
+                        ('F', c) => sel.find_char(c, false),
+                        ('t', c) => sel.find_till(c, true),
+                        ('T', c) => sel.find_till(c, false),
+                        ('g', c) => {
+                            sel.goto(c);
+                        }
+                        _ => {}
+                    }
+                }
+                return;
+            }
         }
-
-        // `Alt-;` flips the selection ends (helix); plain `;` collapses.
-        if matches!(ev.key, Key::Char(';')) && ev.mods.contains(Mods::ALT) {
-            sel.swap_ends();
-            return;
-        }
-        // Release the borrow: vertical motions may scroll the pane, which
-        // needs `&mut self` for the snapshot refresh.
-        let _ = sel;
 
         match ev.key {
             Key::Char('h') | Key::Left => {
